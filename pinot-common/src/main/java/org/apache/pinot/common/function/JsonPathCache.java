@@ -16,31 +16,32 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pinot.tools;
+package org.apache.pinot.common.function;
 
-import java.util.concurrent.Callable;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.CacheBuilder;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.spi.cache.Cache;
 
 
-/**
- * Interface class for pinot-admin commands.
- *
- *
- */
-public interface Command extends Callable<Integer> {
+public class JsonPathCache implements Cache {
+  private static final long DEFAULT_CACHE_MAXIMUM_SIZE = 10000;
 
-  default Integer call() throws Exception {
-    // run execute() and returns 0 if success otherwise return -1.
-    return execute() ? 0 : -1;
+  private final com.google.common.cache.Cache<String, JsonPath> _jsonPathCache =
+      CacheBuilder.newBuilder().maximumSize(DEFAULT_CACHE_MAXIMUM_SIZE).build();
+
+  @Override
+  public JsonPath get(String key) {
+    return _jsonPathCache.getIfPresent(key);
   }
 
-  public boolean execute()
-      throws Exception;
+  @Override
+  public void put(String key, JsonPath value) {
+    _jsonPathCache.put(key, value);
+  }
 
-  public void printUsage();
-
-  public String description();
-
-  // Should return true if -help option is specified for the command, false otherwise.
-  // This is to facilitate PinotAdministrator to print help for individual commands.
-  public boolean getHelp();
+  @VisibleForTesting
+  public long size() {
+    return _jsonPathCache.size();
+  }
 }
