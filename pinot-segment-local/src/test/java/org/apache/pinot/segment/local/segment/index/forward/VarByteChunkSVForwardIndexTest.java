@@ -19,15 +19,18 @@
 package org.apache.pinot.segment.local.segment.index.forward;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.URL;
 import java.nio.ByteOrder;
+import java.nio.file.Files;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.RandomStringUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.pinot.segment.local.io.writer.impl.BaseChunkSVForwardIndexWriter;
 import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkSVForwardIndexWriter;
 import org.apache.pinot.segment.local.segment.creator.impl.fwd.SingleValueVarByteRawIndexCreator;
-import org.apache.pinot.segment.local.segment.index.readers.forward.BaseChunkSVForwardIndexReader;
+import org.apache.pinot.segment.local.segment.index.readers.forward.ChunkReaderContext;
 import org.apache.pinot.segment.local.segment.index.readers.forward.VarByteChunkSVForwardIndexReader;
 import org.apache.pinot.segment.spi.compression.ChunkCompressionType;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
@@ -38,6 +41,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.testng.Assert.fail;
 
 
 /**
@@ -117,11 +121,11 @@ public class VarByteChunkSVForwardIndexTest {
 
     try (VarByteChunkSVForwardIndexReader fourByteOffsetReader = new VarByteChunkSVForwardIndexReader(
         PinotDataBuffer.mapReadOnlyBigEndianFile(outFileFourByte), DataType.STRING);
-        BaseChunkSVForwardIndexReader.ChunkReaderContext fourByteOffsetReaderContext = fourByteOffsetReader
+        ChunkReaderContext fourByteOffsetReaderContext = fourByteOffsetReader
             .createContext();
         VarByteChunkSVForwardIndexReader eightByteOffsetReader = new VarByteChunkSVForwardIndexReader(
             PinotDataBuffer.mapReadOnlyBigEndianFile(outFileEightByte), DataType.STRING);
-        BaseChunkSVForwardIndexReader.ChunkReaderContext eightByteOffsetReaderContext = eightByteOffsetReader
+        ChunkReaderContext eightByteOffsetReaderContext = eightByteOffsetReader
             .createContext()) {
       for (int i = 0; i < NUM_ENTRIES; i++) {
         Assert.assertEquals(fourByteOffsetReader.getString(i, fourByteOffsetReaderContext), expected[i]);
@@ -164,7 +168,7 @@ public class VarByteChunkSVForwardIndexTest {
     File file = new File(resource.getFile());
     try (VarByteChunkSVForwardIndexReader reader = new VarByteChunkSVForwardIndexReader(
         PinotDataBuffer.mapReadOnlyBigEndianFile(file), DataType.STRING);
-        BaseChunkSVForwardIndexReader.ChunkReaderContext readerContext = reader.createContext()) {
+        ChunkReaderContext readerContext = reader.createContext()) {
       for (int i = 0; i < numDocs; i++) {
         String actual = reader.getString(i, readerContext);
         Assert.assertEquals(actual, data[i % data.length]);
@@ -237,7 +241,7 @@ public class VarByteChunkSVForwardIndexTest {
 
     PinotDataBuffer buffer = PinotDataBuffer.mapReadOnlyBigEndianFile(outFile);
     try (VarByteChunkSVForwardIndexReader reader = new VarByteChunkSVForwardIndexReader(buffer, DataType.STRING);
-        BaseChunkSVForwardIndexReader.ChunkReaderContext readerContext = reader.createContext()) {
+        ChunkReaderContext readerContext = reader.createContext()) {
       for (int i = 0; i < numDocs; i++) {
         Assert.assertEquals(reader.getString(i, readerContext), expected[i]);
       }
@@ -257,12 +261,32 @@ public class VarByteChunkSVForwardIndexTest {
     }
 
     try (VarByteChunkSVForwardIndexReader reader = new VarByteChunkSVForwardIndexReader(buffer, DataType.STRING);
-        BaseChunkSVForwardIndexReader.ChunkReaderContext readerContext = reader.createContext()) {
+        ChunkReaderContext readerContext = reader.createContext()) {
       for (int i = 0; i < numDocs; i++) {
         Assert.assertEquals(reader.getString(i, readerContext), expected[i]);
       }
     }
 
     FileUtils.deleteQuietly(outFile);
+  }
+
+  @Test(expectedExceptions = IllegalStateException.class)
+  public void testV2IntegerOverflow()
+      throws IOException {
+    File file = Files.createTempFile(getClass().getSimpleName(), "big-file").toFile();
+    file.deleteOnExit();
+    int docSize = 21475;
+    byte[] value = StringUtils.repeat("a", docSize).getBytes(UTF_8);
+    try (VarByteChunkSVForwardIndexWriter writer = new VarByteChunkSVForwardIndexWriter(file,
+        ChunkCompressionType.PASS_THROUGH, 100_001, 1000, docSize, 2)) {
+      try {
+        for (int i = 0; i < 100_000; i++) {
+          writer.putBytes(value);
+        }
+      } catch (Throwable t) {
+        fail("failed too early", t);
+      }
+      writer.putBytes(value);
+    }
   }
 }

@@ -23,7 +23,6 @@ import AddIcon from '@material-ui/icons/Add';
 import ClearIcon from '@material-ui/icons/Clear';
 import { Autocomplete } from '@material-ui/lab';
 import { debug } from 'webpack';
-import _ from 'lodash';
 
 const useStyles = makeStyles((theme: Theme) =>
   createStyles({
@@ -108,9 +107,9 @@ export default function SchemaComponent({
     dateTimeFieldSpecs: []
   };
   const defaultDataTypeOptions = {
-    dimension: ["INT", "LONG", "STRING", "FLOAT", "DOUBLE", "BYTES", "BOOLEAN"],
+    dimension: ["INT", "LONG", "STRING", "FLOAT", "DOUBLE", "BYTES", "BOOLEAN", "JSON"],
     metric: ["INT", "LONG", "DOUBLE", "FLOAT", "BYTES"],
-    datetime: ["STRING", "INT", "LONG"]
+    datetime: ["STRING", "INT", "LONG", "TIMESTAMP"]
   };
   const preFilledData = {
     dimension: {
@@ -128,7 +127,7 @@ export default function SchemaComponent({
       granularityUnit: "MILLISECONDS"
     },
   };
-  
+
   const [columnList, setColumnList] = useState([{...defaultColumnObj}]);
 
   const setPreFilledData = (index, fieldName, value, colList) => {
@@ -234,7 +233,7 @@ export default function SchemaComponent({
                   onChange={(e)=> changeHandler(index, 'columnName', e.target.value)}
                 />
               </FormControl>
-              
+
               <FormControl className={classes.formControl}>
                 <InputLabel htmlFor="type">Type {requiredAstrix}</InputLabel>
                 <Select
@@ -326,7 +325,7 @@ export default function SchemaComponent({
                     <MenuItem value="DAYS">DAYS</MenuItem>
                   </Select>
                 </FormControl>
-                
+
                 <FormControl className={classes.formControl}>
                   <InputLabel htmlFor="timeFormat">Time Format {requiredAstrix}</InputLabel>
                   <Select
@@ -386,7 +385,7 @@ export default function SchemaComponent({
                   <AddIcon className={classes.greenColor}/>
                 </IconButton>
               </FormControl>
-              
+
               {columnList.length >= 2 && <FormControl>
                 <IconButton
                   aria-label="clear"

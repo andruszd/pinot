@@ -30,7 +30,7 @@ import java.util.List;
 import java.util.Map;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.controller.helix.ControllerRequestURLBuilder;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.data.readers.FileFormat;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.ingestion.batch.BatchConfigProperties;
@@ -44,6 +44,7 @@ import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentNameGeneratorSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.TableSpec;
 import org.apache.pinot.spi.utils.IngestionConfigUtils;
+import org.apache.pinot.spi.utils.builder.ControllerRequestURLBuilder;
 import org.apache.pinot.tools.Command;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,7 +86,10 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
   @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
   private String _authToken;
 
-  @CommandLine.Option(names = {"-tempDir"}, 
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
+
+  @CommandLine.Option(names = {"-tempDir"},
       description = "Temporary directory used to hold data during segment creation.")
   private String _tempDir = new File(FileUtils.getTempDirectory(), getClass().getSimpleName()).getAbsolutePath();
 
@@ -95,6 +99,8 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
   @SuppressWarnings("FieldCanBeLocal")
   @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, help = true, description = "Print this message.")
   private boolean _help = false;
+
+  private AuthProvider _authProvider;
 
   public ImportDataCommand setDataFilePath(String dataFilePath) {
     _dataFilePath = dataFilePath;
@@ -143,8 +149,8 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
     return this;
   }
 
-  public ImportDataCommand setAuthToken(String authToken) {
-    _authToken = authToken;
+  public ImportDataCommand setAuthProvider(AuthProvider authProvider) {
+    _authProvider = authProvider;
     return this;
   }
 
@@ -253,7 +259,7 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
     spec.setCleanUpOutputDir(true);
     spec.setOverwriteOutput(true);
     spec.setJobType("SegmentCreationAndTarPush");
-    spec.setAuthToken(makeAuthToken(_authToken, _user, _password));
+    spec.setAuthToken(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password).getTaskToken());
 
     // set ExecutionFrameworkSpec
     ExecutionFrameworkSpec executionFrameworkSpec = new ExecutionFrameworkSpec();
@@ -379,6 +385,9 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
 
   private String getRecordReaderConfigClass(FileFormat format) {
     switch (format) {
+      case AVRO:
+      case GZIPPED_AVRO:
+        return "org.apache.pinot.plugin.inputformat.avro.AvroRecordReaderConfig";
       case CSV:
         return "org.apache.pinot.plugin.inputformat.csv.CSVRecordReaderConfig";
       case PROTO:
@@ -387,8 +396,6 @@ public class ImportDataCommand extends AbstractBaseAdminCommand implements Comma
         return "org.apache.pinot.plugin.inputformat.thrift.ThriftRecordReaderConfig";
       case ORC:
       case JSON:
-      case AVRO:
-      case GZIPPED_AVRO:
       case PARQUET:
         return null;
       default:

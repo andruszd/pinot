@@ -25,14 +25,14 @@ import java.util.Set;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.pinot.common.request.BrokerRequest;
+import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.common.utils.HLCSegmentName;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.utils.CommonConstants.Broker.Request;
 import org.testng.annotations.Test;
 
-import static org.apache.pinot.broker.routing.segmentselector.RealtimeSegmentSelector.FORCE_HLC;
-import static org.apache.pinot.broker.routing.segmentselector.RealtimeSegmentSelector.ROUTING_OPTIONS_KEY;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.CONSUMING;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.ONLINE;
 import static org.mockito.Mockito.mock;
@@ -62,13 +62,15 @@ public class SegmentSelectorTest {
     Map<String, String> onlineInstanceStateMap = Collections.singletonMap("server", ONLINE);
     Map<String, String> consumingInstanceStateMap = Collections.singletonMap("server", CONSUMING);
     Set<String> onlineSegments = new HashSet<>();
-    // NOTE: Ideal state is not used in the current implementation.
+    // NOTE: Ideal state is not used in the current implementation
     IdealState idealState = mock(IdealState.class);
 
     // Should return an empty list when there is no segment
     RealtimeSegmentSelector segmentSelector = new RealtimeSegmentSelector();
-    segmentSelector.init(externalView, idealState, onlineSegments);
+    segmentSelector.init(idealState, externalView, onlineSegments);
     BrokerRequest brokerRequest = mock(BrokerRequest.class);
+    PinotQuery pinotQuery = mock(PinotQuery.class);
+    when(brokerRequest.getPinotQuery()).thenReturn(pinotQuery);
     assertTrue(segmentSelector.select(brokerRequest).isEmpty());
 
     // For HLC segments, only one group of segments should be selected
@@ -86,7 +88,7 @@ public class SegmentSelectorTest {
       }
       hlcSegments[i] = hlcSegmentsForGroup;
     }
-    segmentSelector.onExternalViewChange(externalView, idealState, onlineSegments);
+    segmentSelector.onAssignmentChange(idealState, externalView, onlineSegments);
 
     // Only HLC segments exist, should select the HLC segments from the first group
     assertEqualsNoOrder(segmentSelector.select(brokerRequest).toArray(), hlcSegments[0]);
@@ -110,13 +112,14 @@ public class SegmentSelectorTest {
         }
       }
     }
-    segmentSelector.onExternalViewChange(externalView, idealState, onlineSegments);
+    segmentSelector.onAssignmentChange(idealState, externalView, onlineSegments);
 
     // Both HLC and LLC segments exist, should select the LLC segments
     assertEqualsNoOrder(segmentSelector.select(brokerRequest).toArray(), expectedSelectedLLCSegments);
 
     // When HLC is forced, should select the HLC segments from the second group
-    when(brokerRequest.getDebugOptions()).thenReturn(Collections.singletonMap(ROUTING_OPTIONS_KEY, FORCE_HLC));
+    when(pinotQuery.getQueryOptions()).thenReturn(
+        Collections.singletonMap(Request.QueryOptionKey.ROUTING_OPTIONS, Request.QueryOptionValue.ROUTING_FORCE_HLC));
     assertEqualsNoOrder(segmentSelector.select(brokerRequest).toArray(), hlcSegments[1]);
 
     // Remove all the HLC segments from ideal state, should select the LLC segments even when HLC is forced
@@ -125,7 +128,7 @@ public class SegmentSelectorTest {
         onlineSegments.remove(hlcSegment);
       }
     }
-    segmentSelector.onExternalViewChange(externalView, idealState, onlineSegments);
+    segmentSelector.onAssignmentChange(idealState, externalView, onlineSegments);
     assertEqualsNoOrder(segmentSelector.select(brokerRequest).toArray(), expectedSelectedLLCSegments);
   }
 }

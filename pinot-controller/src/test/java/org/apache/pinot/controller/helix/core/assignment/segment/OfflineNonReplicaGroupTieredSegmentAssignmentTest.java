@@ -33,12 +33,12 @@ import org.apache.pinot.common.tier.PinotServerTierStorage;
 import org.apache.pinot.common.tier.Tier;
 import org.apache.pinot.common.tier.TierFactory;
 import org.apache.pinot.common.tier.TierSegmentSelector;
-import org.apache.pinot.controller.helix.core.rebalance.RebalanceConfigConstants;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.TierConfig;
 import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel;
+import org.apache.pinot.spi.utils.RebalanceConfigConstants;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
@@ -102,12 +102,12 @@ public class OfflineNonReplicaGroupTieredSegmentAssignmentTest {
   @BeforeClass
   public void setUp() {
     List<TierConfig> tierConfigList = Lists.newArrayList(
-        new TierConfig(TIER_A_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "50d",
-            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_A_NAME),
-        new TierConfig(TIER_B_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "70d",
-            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_B_NAME),
-        new TierConfig(TIER_C_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "120d",
-            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_C_NAME));
+        new TierConfig(TIER_A_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "50d", null,
+            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_A_NAME, null, null),
+        new TierConfig(TIER_B_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "70d", null,
+            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_B_NAME, null, null),
+        new TierConfig(TIER_C_NAME, TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "120d", null,
+            TierFactory.PINOT_SERVER_STORAGE_TYPE, TAG_C_NAME, null, null));
     TableConfig tableConfig =
         new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setNumReplicas(NUM_REPLICAS)
             .setTierConfigList(tierConfigList).build();
@@ -132,10 +132,10 @@ public class OfflineNonReplicaGroupTieredSegmentAssignmentTest {
     _tierInstancePartitionsMap.put(TIER_B_NAME, instancePartitionsTierB);
     _tierInstancePartitionsMap.put(TIER_C_NAME, instancePartitionsTierC);
 
-    _sortedTiers = Lists
-        .newArrayList(new Tier(TIER_C_NAME, new TestSegmentSelectorC(), new PinotServerTierStorage(TAG_C_NAME)),
-            new Tier(TIER_B_NAME, new TestSegmentSelectorB(), new PinotServerTierStorage(TAG_B_NAME)),
-            new Tier(TIER_A_NAME, new TestSegmentSelectorA(), new PinotServerTierStorage(TAG_A_NAME)));
+    _sortedTiers = Lists.newArrayList(
+        new Tier(TIER_C_NAME, new TestSegmentSelectorC(), new PinotServerTierStorage(TAG_C_NAME, null, null)),
+        new Tier(TIER_B_NAME, new TestSegmentSelectorB(), new PinotServerTierStorage(TAG_B_NAME, null, null)),
+        new Tier(TIER_A_NAME, new TestSegmentSelectorA(), new PinotServerTierStorage(TAG_A_NAME, null, null)));
   }
 
   @Test
@@ -144,8 +144,8 @@ public class OfflineNonReplicaGroupTieredSegmentAssignmentTest {
     for (String segmentName : SEGMENTS) {
       List<String> instancesAssigned =
           _segmentAssignment.assignSegment(segmentName, currentAssignment, _instancePartitionsMap);
-      currentAssignment
-          .put(segmentName, SegmentAssignmentUtils.getInstanceStateMap(instancesAssigned, SegmentStateModel.ONLINE));
+      currentAssignment.put(segmentName,
+          SegmentAssignmentUtils.getInstanceStateMap(instancesAssigned, SegmentStateModel.ONLINE));
     }
 
     // There should be 100 segments assigned
@@ -163,9 +163,9 @@ public class OfflineNonReplicaGroupTieredSegmentAssignmentTest {
     assertEquals(numSegmentsAssignedPerInstance, expectedNumSegmentsAssignedPerInstance);
 
     // On rebalancing, segments move to tiers
-    Map<String, Map<String, String>> newAssignment = _segmentAssignment
-        .rebalanceTable(currentAssignment, _instancePartitionsMap, _sortedTiers, _tierInstancePartitionsMap,
-            new BaseConfiguration());
+    Map<String, Map<String, String>> newAssignment =
+        _segmentAssignment.rebalanceTable(currentAssignment, _instancePartitionsMap, _sortedTiers,
+            _tierInstancePartitionsMap, new BaseConfiguration());
     assertEquals(newAssignment.size(), NUM_SEGMENTS);
 
     // segments 0-49 remain unchanged
@@ -217,16 +217,16 @@ public class OfflineNonReplicaGroupTieredSegmentAssignmentTest {
     for (String segmentName : SEGMENTS) {
       List<String> instancesAssigned =
           _segmentAssignment.assignSegment(segmentName, currentAssignment, _instancePartitionsMap);
-      currentAssignment
-          .put(segmentName, SegmentAssignmentUtils.getInstanceStateMap(instancesAssigned, SegmentStateModel.ONLINE));
+      currentAssignment.put(segmentName,
+          SegmentAssignmentUtils.getInstanceStateMap(instancesAssigned, SegmentStateModel.ONLINE));
     }
 
     // Bootstrap table should reassign all segments
     Configuration rebalanceConfig = new BaseConfiguration();
     rebalanceConfig.setProperty(RebalanceConfigConstants.BOOTSTRAP, true);
-    Map<String, Map<String, String>> newAssignment = _segmentAssignment
-        .rebalanceTable(currentAssignment, _instancePartitionsMap, _sortedTiers, _tierInstancePartitionsMap,
-            new BaseConfiguration());
+    Map<String, Map<String, String>> newAssignment =
+        _segmentAssignment.rebalanceTable(currentAssignment, _instancePartitionsMap, _sortedTiers,
+            _tierInstancePartitionsMap, new BaseConfiguration());
     assertEquals(newAssignment.size(), NUM_SEGMENTS);
 
     // segments 0-49 remain unchanged

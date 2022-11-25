@@ -19,10 +19,13 @@
 package org.apache.pinot.minion;
 
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import javax.net.ssl.SSLContext;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -33,20 +36,23 @@ import org.apache.helix.manager.zk.ZKHelixManager;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.task.TaskStateModelFactory;
 import org.apache.pinot.common.Utils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.config.TlsConfig;
+import org.apache.pinot.common.metrics.MinionGauge;
 import org.apache.pinot.common.metrics.MinionMeter;
 import org.apache.pinot.common.metrics.MinionMetrics;
-import org.apache.pinot.common.metrics.PinotMetricUtils;
 import org.apache.pinot.common.utils.ClientSSLContextGenerator;
 import org.apache.pinot.common.utils.ServiceStartableUtils;
 import org.apache.pinot.common.utils.ServiceStatus;
+import org.apache.pinot.common.utils.TlsUtils;
 import org.apache.pinot.common.utils.fetcher.SegmentFetcherFactory;
 import org.apache.pinot.common.utils.helix.HelixHelper;
+import org.apache.pinot.common.version.PinotVersion;
 import org.apache.pinot.core.transport.ListenerConfig;
-import org.apache.pinot.core.transport.TlsConfig;
 import org.apache.pinot.core.util.ListenerConfigUtil;
-import org.apache.pinot.core.util.TlsUtils;
 import org.apache.pinot.minion.event.EventObserverFactoryRegistry;
 import org.apache.pinot.minion.event.MinionEventObserverFactory;
+import org.apache.pinot.minion.event.MinionEventObservers;
 import org.apache.pinot.minion.executor.MinionTaskZkMetadataManager;
 import org.apache.pinot.minion.executor.PinotTaskExecutorFactory;
 import org.apache.pinot.minion.executor.TaskExecutorFactoryRegistry;
@@ -54,10 +60,12 @@ import org.apache.pinot.minion.taskfactory.TaskFactoryRegistry;
 import org.apache.pinot.spi.crypt.PinotCrypterFactory;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
+import org.apache.pinot.spi.metrics.PinotMetricUtils;
 import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.services.ServiceStartable;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.InstanceTypeUtils;
 import org.apache.pinot.sql.parsers.rewriter.QueryRewriterFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,6 +88,7 @@ public abstract class BaseMinionStarter implements ServiceStartable {
   protected EventObserverFactoryRegistry _eventObserverFactoryRegistry;
   protected MinionAdminApiApplication _minionAdminApplication;
   protected List<ListenerConfig> _listenerConfigs;
+  protected ExecutorService _executorService;
 
   @Override
   public void init(PinotConfiguration config)
@@ -95,16 +104,19 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     _instanceId = _config.getInstanceId();
     if (_instanceId != null) {
       // NOTE: Force all instances to have the same prefix in order to derive the instance type based on the instance id
-      Preconditions.checkState(_instanceId.startsWith(CommonConstants.Helix.PREFIX_OF_MINION_INSTANCE),
-          "Instance id must have prefix '%s', got '%s'", CommonConstants.Helix.PREFIX_OF_MINION_INSTANCE, _instanceId);
+      Preconditions.checkState(InstanceTypeUtils.isMinion(_instanceId), "Instance id must have prefix '%s', got '%s'",
+          CommonConstants.Helix.PREFIX_OF_MINION_INSTANCE, _instanceId);
     } else {
       _instanceId = CommonConstants.Helix.PREFIX_OF_MINION_INSTANCE + _hostname + "_" + _port;
     }
-    _listenerConfigs = ListenerConfigUtil.buildMinionAdminConfigs(_config);
+    _listenerConfigs = ListenerConfigUtil.buildMinionConfigs(_config);
     _helixManager = new ZKHelixManager(helixClusterName, _instanceId, InstanceType.PARTICIPANT, zkAddress);
     MinionTaskZkMetadataManager minionTaskZkMetadataManager = new MinionTaskZkMetadataManager(_helixManager);
     _taskExecutorFactoryRegistry = new TaskExecutorFactoryRegistry(minionTaskZkMetadataManager, _config);
     _eventObserverFactoryRegistry = new EventObserverFactoryRegistry(minionTaskZkMetadataManager);
+    _executorService =
+        Executors.newCachedThreadPool(new ThreadFactoryBuilder().setNameFormat("async-task-thread-%d").build());
+    MinionEventObservers.init(_config, _executorService);
   }
 
   private void setupHelixSystemProperties() {
@@ -154,7 +166,7 @@ public abstract class BaseMinionStarter implements ServiceStartable {
   @Override
   public void start()
       throws Exception {
-    LOGGER.info("Starting Pinot minion: {}", _instanceId);
+    LOGGER.info("Starting Pinot minion: {} (Version: {})", _instanceId, PinotVersion.VERSION);
     Utils.logVersions();
     MinionContext minionContext = MinionContext.getInstance();
 
@@ -174,10 +186,9 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     // TODO: put all the metrics related configs down to "pinot.server.metrics"
     PinotMetricsRegistry metricsRegistry = PinotMetricUtils.getPinotMetricsRegistry(_config.getMetricsConfig());
 
-    MinionMetrics minionMetrics = new MinionMetrics(_config
-        .getProperty(CommonConstants.Minion.CONFIG_OF_METRICS_PREFIX_KEY,
-            CommonConstants.Minion.CONFIG_OF_METRICS_PREFIX), metricsRegistry);
+    MinionMetrics minionMetrics = new MinionMetrics(_config.getMetricsPrefix(), metricsRegistry);
     minionMetrics.initializeGlobalMeters();
+    minionMetrics.setValueOfGlobalGauge(MinionGauge.VERSION, PinotVersion.VERSION_METRIC_NAME, 1);
     minionContext.setMinionMetrics(minionMetrics);
 
     // Install default SSL context if necessary (even if not force-enabled everywhere)
@@ -189,11 +200,15 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     }
 
     // initialize authentication
-    minionContext.setTaskAuthToken(_config.getProperty(CommonConstants.Minion.CONFIG_OF_TASK_AUTH_TOKEN));
+    minionContext.setTaskAuthProvider(
+        AuthProviderUtils.extractAuthProvider(_config, CommonConstants.Minion.CONFIG_TASK_AUTH_NAMESPACE));
 
     // Start all components
     LOGGER.info("Initializing PinotFSFactory");
     PinotConfiguration pinotFSConfig = _config.subset(CommonConstants.Minion.PREFIX_OF_CONFIG_OF_PINOT_FS_FACTORY);
+    if (pinotFSConfig.isEmpty()) {
+      pinotFSConfig = _config.subset(CommonConstants.Minion.DEPRECATED_PREFIX_OF_CONFIG_OF_PINOT_FS_FACTORY);
+    }
     PinotFSFactory.init(pinotFSConfig);
 
     LOGGER.info("Initializing QueryRewriterFactory");
@@ -202,16 +217,28 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     LOGGER.info("Initializing segment fetchers for all protocols");
     PinotConfiguration segmentFetcherFactoryConfig =
         _config.subset(CommonConstants.Minion.PREFIX_OF_CONFIG_OF_SEGMENT_FETCHER_FACTORY);
+    if (segmentFetcherFactoryConfig.isEmpty()) {
+      segmentFetcherFactoryConfig =
+          _config.subset(CommonConstants.Minion.DEPRECATED_PREFIX_OF_CONFIG_OF_SEGMENT_FETCHER_FACTORY);
+    }
     SegmentFetcherFactory.init(segmentFetcherFactoryConfig);
 
     LOGGER.info("Initializing pinot crypter");
     PinotConfiguration pinotCrypterConfig = _config.subset(CommonConstants.Minion.PREFIX_OF_CONFIG_OF_PINOT_CRYPTER);
+    if (pinotCrypterConfig.isEmpty()) {
+      pinotCrypterConfig = _config.subset(CommonConstants.Minion.DEPRECATED_PREFIX_OF_CONFIG_OF_PINOT_CRYPTER);
+    }
     PinotCrypterFactory.init(pinotCrypterConfig);
 
     // Need to do this before we start receiving state transitions.
     LOGGER.info("Initializing ssl context for segment uploader");
-    PinotConfiguration httpsConfig = _config.subset(CommonConstants.Minion.PREFIX_OF_CONFIG_OF_SEGMENT_UPLOADER)
-        .subset(CommonConstants.HTTPS_PROTOCOL);
+    PinotConfiguration segmentUploaderConfig =
+        _config.subset(CommonConstants.Minion.PREFIX_OF_CONFIG_OF_SEGMENT_UPLOADER);
+    if (segmentUploaderConfig.isEmpty()) {
+      segmentUploaderConfig =
+          _config.subset(CommonConstants.Minion.DEPRECATED_PREFIX_OF_CONFIG_OF_SEGMENT_UPLOADER);
+    }
+    PinotConfiguration httpsConfig = segmentUploaderConfig.subset(CommonConstants.HTTPS_PROTOCOL);
     if (httpsConfig.getProperty(HTTPS_ENABLED, false)) {
       SSLContext sslContext =
           new ClientSSLContextGenerator(httpsConfig.subset(CommonConstants.PREFIX_OF_SSL_SUBSET)).generate();
@@ -227,22 +254,39 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     minionContext.setHelixPropertyStore(_helixManager.getHelixPropertyStore());
 
     LOGGER.info("Starting minion admin application on: {}", ListenerConfigUtil.toString(_listenerConfigs));
-    _minionAdminApplication = new MinionAdminApiApplication(_config);
+    _minionAdminApplication = new MinionAdminApiApplication(_instanceId, _config);
     _minionAdminApplication.start(_listenerConfigs);
 
     // Initialize health check callback
     LOGGER.info("Initializing health check callback");
     ServiceStatus.setServiceStatusCallback(_instanceId, new ServiceStatus.ServiceStatusCallback() {
+      private volatile boolean _isStarted = false;
+      private volatile String _statusDescription = "Helix ZK Not connected as " + _helixManager.getInstanceType();
+
       @Override
       public ServiceStatus.Status getServiceStatus() {
         // TODO: add health check here
         minionMetrics.addMeteredGlobalValue(MinionMeter.HEALTH_CHECK_GOOD_CALLS, 1L);
-        return ServiceStatus.Status.GOOD;
+        if (_isStarted) {
+          if (_helixManager.isConnected()) {
+            return ServiceStatus.Status.GOOD;
+          } else {
+            return ServiceStatus.Status.BAD;
+          }
+        }
+
+        if (!_helixManager.isConnected()) {
+          return ServiceStatus.Status.STARTING;
+        } else {
+          _isStarted = true;
+          _statusDescription = ServiceStatus.STATUS_DESCRIPTION_NONE;
+          return ServiceStatus.Status.GOOD;
+        }
       }
 
       @Override
       public String getStatusDescription() {
-        return ServiceStatus.STATUS_DESCRIPTION_NONE;
+        return _statusDescription;
       }
     });
 
@@ -254,6 +298,7 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     boolean updated = HelixHelper.updateHostnamePort(instanceConfig, _hostname, _port);
     updated |= HelixHelper.addDefaultTags(instanceConfig,
         () -> Collections.singletonList(CommonConstants.Helix.UNTAGGED_MINION_INSTANCE));
+    updated |= HelixHelper.removeDisabledPartitions(instanceConfig);
     if (updated) {
       HelixHelper.updateInstanceConfig(_helixManager, instanceConfig);
     }
@@ -277,6 +322,8 @@ public abstract class BaseMinionStarter implements ServiceStartable {
     _helixManager.disconnect();
     LOGGER.info("Deregistering service status handler");
     ServiceStatus.removeServiceStatusCallback(_instanceId);
+    LOGGER.info("Shutting down executor service");
+    _executorService.shutdownNow();
     LOGGER.info("Clean up Minion data directory");
     try {
       FileUtils.cleanDirectory(MinionContext.getInstance().getDataDir());

@@ -28,14 +28,15 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.helix.task.TaskState;
 import org.apache.pinot.common.lineage.SegmentLineageAccessHelper;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.minion.MergeRollupTaskMetadata;
 import org.apache.pinot.common.minion.MinionTaskMetadataUtils;
+import org.apache.pinot.common.utils.SqlResultComparator;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
-import org.apache.pinot.compat.tests.SqlResultComparator;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.minion.PinotHelixTaskResourceManager;
 import org.apache.pinot.controller.helix.core.minion.PinotTaskManager;
@@ -43,6 +44,8 @@ import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
+import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
+import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableTaskConfig;
 import org.apache.pinot.spi.config.table.TableType;
@@ -67,6 +70,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
   private static final String SINGLE_LEVEL_CONCAT_TEST_TABLE = "myTable1";
   private static final String SINGLE_LEVEL_ROLLUP_TEST_TABLE = "myTable2";
   private static final String MULTI_LEVEL_CONCAT_TEST_TABLE = "myTable3";
+  private static final long TIMEOUT_IN_MS = 10_000L;
 
   protected PinotHelixTaskResourceManager _helixTaskResourceManager;
   protected PinotTaskManager _taskManager;
@@ -97,7 +101,8 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     TableConfig singleLevelConcatTableConfig =
         createOfflineTableConfig(SINGLE_LEVEL_CONCAT_TEST_TABLE, getSingleLevelConcatTaskConfig());
     TableConfig singleLevelRollupTableConfig =
-        createOfflineTableConfig(SINGLE_LEVEL_ROLLUP_TEST_TABLE, getSingleLevelRollupTaskConfig());
+        createOfflineTableConfig(SINGLE_LEVEL_ROLLUP_TEST_TABLE, getSingleLevelRollupTaskConfig(),
+            getMultiColumnsSegmentPartitionConfig());
     TableConfig multiLevelConcatTableConfig =
         createOfflineTableConfig(MULTI_LEVEL_CONCAT_TEST_TABLE, getMultiLevelConcatTaskConfig());
     addTableConfig(singleLevelConcatTableConfig);
@@ -131,6 +136,11 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
   }
 
   private TableConfig createOfflineTableConfig(String tableName, TableTaskConfig taskConfig) {
+    return createOfflineTableConfig(tableName, taskConfig, null);
+  }
+
+  private TableConfig createOfflineTableConfig(String tableName, TableTaskConfig taskConfig,
+      @Nullable SegmentPartitionConfig partitionConfig) {
     return new TableConfigBuilder(TableType.OFFLINE).setTableName(tableName).setSchemaName(getSchemaName())
         .setTimeColumnName(getTimeColumnName()).setSortedColumn(getSortedColumn())
         .setInvertedIndexColumns(getInvertedIndexColumns()).setNoDictionaryColumns(getNoDictionaryColumns())
@@ -138,7 +148,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
         .setFieldConfigList(getFieldConfigs()).setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion())
         .setLoadMode(getLoadMode()).setTaskConfig(taskConfig).setBrokerTenant(getBrokerTenant())
         .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig())
-        .setNullHandlingEnabled(getNullHandlingEnabled()).build();
+        .setNullHandlingEnabled(getNullHandlingEnabled()).setSegmentPartitionConfig(partitionConfig).build();
   }
 
   private TableTaskConfig getSingleLevelConcatTaskConfig() {
@@ -176,6 +186,15 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     tableTaskConfigs.put("90days.maxNumRecordsPerSegment", "100000");
     tableTaskConfigs.put("90days.maxNumRecordsPerTask", "100000");
     return new TableTaskConfig(Collections.singletonMap(MinionConstants.MergeRollupTask.TASK_TYPE, tableTaskConfigs));
+  }
+
+  private SegmentPartitionConfig getMultiColumnsSegmentPartitionConfig() {
+    Map<String, ColumnPartitionConfig> columnPartitionConfigMap = new HashMap<>();
+    ColumnPartitionConfig columnOneConfig = new ColumnPartitionConfig("murmur", 1);
+    columnPartitionConfigMap.put("AirlineID", columnOneConfig);
+    ColumnPartitionConfig columnTwoConfig = new ColumnPartitionConfig("murmur", 1);
+    columnPartitionConfigMap.put("Month", columnTwoConfig);
+    return new SegmentPartitionConfig(columnPartitionConfigMap);
   }
 
   private static void buildSegmentsFromAvroWithPostfix(List<File> avroFiles, TableConfig tableConfig,
@@ -260,7 +279,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //      -> {merged_100days_T5_0_myTable1_16400_16435_0}
 
     String sqlQuery = "SELECT count(*) FROM myTable1"; // 115545 rows for the test table
-    JsonNode expectedJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
     int[] expectedNumSubTasks = {1, 2, 2, 2, 1};
     int[] expectedNumSegmentsQueried = {13, 12, 13, 13, 12};
     long expectedWatermark = 16000 * 86_400_000L;
@@ -269,7 +288,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
         tasks != null; tasks =
         _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
-      assertEquals(_helixTaskResourceManager.getTaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
+      assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
@@ -297,12 +316,21 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
         }
       }
 
-      // Check num total doc of merged segments are the same as the original segments
-      JsonNode actualJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
-      SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery);
-      // Check query routing
-      int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
-      assertEquals(numSegmentsQueried, expectedNumSegmentsQueried[numTasks]);
+      final int finalNumTasks = numTasks;
+      TestUtils.waitForCondition(aVoid -> {
+        try {
+          // Check num total doc of merged segments are the same as the original segments
+          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
+            return false;
+          }
+          // Check query routing
+          int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
+          return numSegmentsQueried == expectedNumSegmentsQueried[finalNumTasks];
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }, TIMEOUT_IN_MS, "Timeout while validating segments");
     }
     // Check total tasks
     assertEquals(numTasks, 5);
@@ -357,7 +385,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //      -> {merged_150days_1628644105127_0_myTable2_16352_16429_0}
 
     String sqlQuery = "SELECT count(*) FROM myTable2"; // 115545 rows for the test table
-    JsonNode expectedJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
     int[] expectedNumSegmentsQueried = {16, 7, 3};
     long expectedWatermark = 16050 * 86_400_000L;
     String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(SINGLE_LEVEL_ROLLUP_TEST_TABLE);
@@ -365,7 +393,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
         tasks != null; tasks =
         _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
-      assertEquals(_helixTaskResourceManager.getTaskConfigs(tasks).size(), 1);
+      assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), 1);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
@@ -393,23 +421,31 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
         }
       }
 
-      // Check total doc of merged segments are less than the original segments
-      JsonNode actualJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
-      assertTrue(
-          actualJson.get("resultTable").get("rows").get(0).get(0).asInt() < expectedJson.get("resultTable").get("rows")
-              .get(0).get(0).asInt());
-      // Check query routing
-      int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
-      assertEquals(numSegmentsQueried, expectedNumSegmentsQueried[numTasks]);
+      final int finalNumTasks = numTasks;
+      TestUtils.waitForCondition(aVoid -> {
+        try {
+          // Check total doc of merged segments are less than the original segments
+          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          if (actualJson.get("resultTable").get("rows").get(0).get(0).asInt() >= expectedJson.get("resultTable")
+              .get("rows").get(0).get(0).asInt()) {
+            return false;
+          }
+          // Check query routing
+          int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
+          return numSegmentsQueried == expectedNumSegmentsQueried[finalNumTasks];
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }, TIMEOUT_IN_MS, "Timeout while validating segments");
     }
 
     // Check total doc is half of the original after all merge tasks are finished
-    JsonNode actualJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
     assertEquals(actualJson.get("resultTable").get("rows").get(0).get(0).asInt(),
         expectedJson.get("resultTable").get("rows").get(0).get(0).asInt() / 2);
     // Check time column is rounded
     JsonNode responseJson =
-        postSqlQuery("SELECT count(*), DaysSinceEpoch FROM myTable2 GROUP BY DaysSinceEpoch ORDER BY DaysSinceEpoch");
+        postQuery("SELECT count(*), DaysSinceEpoch FROM myTable2 GROUP BY DaysSinceEpoch ORDER BY DaysSinceEpoch");
     for (int i = 0; i < responseJson.get("resultTable").get("rows").size(); i++) {
       int daysSinceEpoch = responseJson.get("resultTable").get("rows").get(i).get(1).asInt();
       assertTrue(daysSinceEpoch % 7 == 0);
@@ -488,7 +524,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     //    90days: [16380, 16470) is not a valid merge window because windowEndTime > 45days watermark, not scheduling
 
     String sqlQuery = "SELECT count(*) FROM myTable3"; // 115545 rows for the test table
-    JsonNode expectedJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode expectedJson = postQuery(sqlQuery, _brokerBaseApiUrl);
     int[] expectedNumSubTasks = {1, 2, 1, 2, 1, 2, 1, 2, 1};
     int[] expectedNumSegmentsQueried = {12, 12, 11, 10, 9, 8, 7, 6, 5};
     Long[] expectedWatermarks45Days = {16065L, 16110L, 16155L, 16200L, 16245L, 16290L, 16335L, 16380L};
@@ -505,7 +541,7 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
     for (String tasks = _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE);
         tasks != null; tasks =
         _taskManager.scheduleTasks(offlineTableName).get(MinionConstants.MergeRollupTask.TASK_TYPE), numTasks++) {
-      assertEquals(_helixTaskResourceManager.getTaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
+      assertEquals(_helixTaskResourceManager.getSubtaskConfigs(tasks).size(), expectedNumSubTasks[numTasks]);
       assertTrue(_helixTaskResourceManager.getTaskQueues()
           .contains(PinotHelixTaskResourceManager.getHelixJobQueueName(MinionConstants.MergeRollupTask.TASK_TYPE)));
       // Will not schedule task if there's incomplete task
@@ -539,12 +575,21 @@ public class MergeRollupMinionClusterIntegrationTest extends BaseClusterIntegrat
         }
       }
 
-      // Check total doc of merged segments are the same as the original segments
-      JsonNode actualJson = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
-      SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery);
-      // Check query routing
-      int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
-      assertEquals(numSegmentsQueried, expectedNumSegmentsQueried[numTasks]);
+      final int finalNumTasks = numTasks;
+      TestUtils.waitForCondition(aVoid -> {
+        try {
+          // Check total doc of merged segments are the same as the original segments
+          JsonNode actualJson = postQuery(sqlQuery, _brokerBaseApiUrl);
+          if (!SqlResultComparator.areEqual(actualJson, expectedJson, sqlQuery)) {
+            return false;
+          }
+          // Check query routing
+          int numSegmentsQueried = actualJson.get("numSegmentsQueried").asInt();
+          return numSegmentsQueried == expectedNumSegmentsQueried[finalNumTasks];
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }, TIMEOUT_IN_MS, "Timeout while validating segments");
     }
     // Check total tasks
     assertEquals(numTasks, 8);

@@ -26,12 +26,10 @@ import org.apache.pinot.common.Utils;
  *
  */
 public enum ServerGauge implements AbstractMetrics.Gauge {
+  VERSION("version", true),
   DOCUMENT_COUNT("documents", false),
   SEGMENT_COUNT("segments", false),
   LLC_PARTITION_CONSUMING("state", false),
-  HIGHEST_KAFKA_OFFSET_CONSUMED("messages", false),
-  // Introducing a new stream agnostic metric to replace HIGHEST_KAFKA_OFFSET_CONSUMED.
-  // We can phase out HIGHEST_KAFKA_OFFSET_CONSUMED once we have collected sufficient metrics for the new one
   HIGHEST_STREAM_OFFSET_CONSUMED("messages", false),
   LAST_REALTIME_SEGMENT_CREATION_DURATION_SECONDS("seconds", false),
   LAST_REALTIME_SEGMENT_CREATION_WAIT_TIME_SECONDS("seconds", false),
@@ -43,7 +41,11 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   LLC_SIMULTANEOUS_SEGMENT_BUILDS("llcSimultaneousSegmentBuilds", true),
   RESIZE_TIME_MS("milliseconds", false),
   // Upsert metrics
-  UPSERT_PRIMARY_KEYS_COUNT("upsertPrimaryKeysCount", false);
+  UPSERT_PRIMARY_KEYS_COUNT("upsertPrimaryKeysCount", false),
+  // Dedup metrics
+  DEDUP_PRIMARY_KEYS_COUNT("dedupPrimaryKeysCount", false),
+  CONSUMPTION_QUOTA_UTILIZATION("ratio", false),
+  JVM_HEAP_USED_BYTES("bytes", true);
 
   private final String _gaugeName;
   private final String _unit;

@@ -23,7 +23,6 @@ import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -34,12 +33,10 @@ import javax.annotation.Nullable;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.segment.local.recordtransformer.ComplexTypeTransformer;
-import org.apache.pinot.segment.local.recordtransformer.CompositeTransformer;
 import org.apache.pinot.segment.local.recordtransformer.RecordTransformer;
-import org.apache.pinot.segment.local.segment.creator.IntermediateSegmentSegmentCreationDataSource;
 import org.apache.pinot.segment.local.segment.creator.RecordReaderSegmentCreationDataSource;
+import org.apache.pinot.segment.local.segment.creator.TransformPipeline;
 import org.apache.pinot.segment.local.segment.index.converter.SegmentFormatConverterFactory;
-import org.apache.pinot.segment.local.segment.readers.IntermediateSegmentRecordReader;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
 import org.apache.pinot.segment.local.startree.v2.builder.MultipleTreesBuilder;
 import org.apache.pinot.segment.local.utils.CrcUtils;
@@ -77,7 +74,6 @@ import org.slf4j.LoggerFactory;
  * Implementation of an index segment creator.
  */
 // TODO: Check resource leaks
-@SuppressWarnings("serial")
 public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDriver {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentIndexCreationDriverImpl.class);
 
@@ -88,8 +84,7 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
   private SegmentCreator _indexCreator;
   private SegmentIndexCreationInfo _segmentIndexCreationInfo;
   private Schema _dataSchema;
-  private RecordTransformer _recordTransformer;
-  private ComplexTypeTransformer _complexTypeTransformer;
+  private TransformPipeline _transformPipeline;
   private IngestionSchemaValidator _ingestionSchemaValidator;
   private int _totalDocs = 0;
   private File _tempIndexDir;
@@ -97,6 +92,7 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
   private long _totalRecordReadTime = 0;
   private long _totalIndexTime = 0;
   private long _totalStatsCollectorTime = 0;
+  private boolean _continueOnError;
 
   @Override
   public void init(SegmentGeneratorConfig config)
@@ -144,30 +140,33 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
 
   public void init(SegmentGeneratorConfig config, RecordReader recordReader)
       throws Exception {
-    SegmentCreationDataSource dataSource;
-    if (recordReader instanceof IntermediateSegmentRecordReader) {
-      LOGGER.info("IntermediateSegmentRecordReader is used");
-      dataSource = new IntermediateSegmentSegmentCreationDataSource((IntermediateSegmentRecordReader) recordReader);
-    } else {
-      LOGGER.info("RecordReaderSegmentCreationDataSource is used");
-      dataSource = new RecordReaderSegmentCreationDataSource(recordReader);
-    }
-    init(config, dataSource, CompositeTransformer.getDefaultTransformer(config.getTableConfig(), config.getSchema()),
-        ComplexTypeTransformer.getComplexTypeTransformer(config.getTableConfig()));
+    SegmentCreationDataSource dataSource = new RecordReaderSegmentCreationDataSource(recordReader);
+    init(config, dataSource, new TransformPipeline(config.getTableConfig(), config.getSchema()));
+  }
+
+  @Deprecated
+  public void init(SegmentGeneratorConfig config, SegmentCreationDataSource dataSource,
+      RecordTransformer recordTransformer, @Nullable ComplexTypeTransformer complexTypeTransformer)
+      throws Exception {
+    init(config, dataSource, new TransformPipeline(recordTransformer, complexTypeTransformer));
   }
 
   public void init(SegmentGeneratorConfig config, SegmentCreationDataSource dataSource,
-      RecordTransformer recordTransformer, @Nullable ComplexTypeTransformer complexTypeTransformer)
+      TransformPipeline transformPipeline)
       throws Exception {
     _config = config;
     _recordReader = dataSource.getRecordReader();
     _dataSchema = config.getSchema();
+    _continueOnError = config.isContinueOnError();
+
     if (config.isFailOnEmptySegment()) {
       Preconditions.checkState(_recordReader.hasNext(), "No record in data source");
     }
-
-    _recordTransformer = recordTransformer;
-    _complexTypeTransformer = complexTypeTransformer;
+    _transformPipeline = transformPipeline;
+    // Use the same transform pipeline if the data source is backed by a record reader
+    if (dataSource instanceof RecordReaderSegmentCreationDataSource) {
+      ((RecordReaderSegmentCreationDataSource) dataSource).setTransformPipeline(transformPipeline);
+    }
 
     // Initialize stats collection
     _segmentStats = dataSource.gatherStats(
@@ -204,48 +203,45 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     LOGGER.info("Finished building StatsCollector!");
     LOGGER.info("Collected stats for {} documents", _totalDocs);
 
+    int incompleteRowsFound = 0;
     try {
       // Initialize the index creation using the per-column statistics information
+      // TODO: _indexCreationInfoMap holds the reference to all unique values on heap (ColumnIndexCreationInfo ->
+      //       ColumnStatistics) throughout the segment creation. Find a way to release the memory early.
       _indexCreator.init(_config, _segmentIndexCreationInfo, _indexCreationInfoMap, _dataSchema, _tempIndexDir);
 
       // Build the index
       _recordReader.rewind();
       LOGGER.info("Start building IndexCreator!");
       GenericRow reuse = new GenericRow();
+      TransformPipeline.Result reusedResult = new TransformPipeline.Result();
       while (_recordReader.hasNext()) {
         long recordReadStartTime = System.currentTimeMillis();
-        long recordReadStopTime;
+        long recordReadStopTime = System.currentTimeMillis();
         long indexStopTime;
         reuse.clear();
-        GenericRow decodedRow = _recordReader.next(reuse);
-        if (_complexTypeTransformer != null) {
-          // TODO: consolidate complex type transformer into composite type transformer
-          decodedRow = _complexTypeTransformer.transform(decodedRow);
-        }
-        if (decodedRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY) != null) {
+        try {
+          GenericRow decodedRow = _recordReader.next(reuse);
+          recordReadStartTime = System.currentTimeMillis();
+          _transformPipeline.processRow(decodedRow, reusedResult);
           recordReadStopTime = System.currentTimeMillis();
           _totalRecordReadTime += (recordReadStopTime - recordReadStartTime);
-          for (Object singleRow : (Collection) decodedRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY)) {
-            recordReadStartTime = System.currentTimeMillis();
-            GenericRow transformedRow = _recordTransformer.transform((GenericRow) singleRow);
-            recordReadStopTime = System.currentTimeMillis();
-            _totalRecordReadTime += (recordReadStopTime - recordReadStartTime);
-            if (transformedRow != null && IngestionUtils.shouldIngestRow(transformedRow)) {
-              _indexCreator.indexRow(transformedRow);
-              indexStopTime = System.currentTimeMillis();
-              _totalIndexTime += (indexStopTime - recordReadStopTime);
-            }
-          }
-        } else {
-          GenericRow transformedRow = _recordTransformer.transform(decodedRow);
-          recordReadStopTime = System.currentTimeMillis();
-          _totalRecordReadTime += (recordReadStopTime - recordReadStartTime);
-          if (transformedRow != null && IngestionUtils.shouldIngestRow(transformedRow)) {
-            _indexCreator.indexRow(transformedRow);
-            indexStopTime = System.currentTimeMillis();
-            _totalIndexTime += (indexStopTime - recordReadStopTime);
+        } catch (Exception e) {
+          if (!_continueOnError) {
+            throw new RuntimeException("Error occurred while reading row during indexing", e);
+          } else {
+            incompleteRowsFound++;
+            LOGGER.debug("Error occurred while reading row during indexing", e);
+            continue;
           }
         }
+
+        for (GenericRow row : reusedResult.getTransformedRows()) {
+          _indexCreator.indexRow(row);
+        }
+        indexStopTime = System.currentTimeMillis();
+        _totalIndexTime += (indexStopTime - recordReadStopTime);
+        incompleteRowsFound += reusedResult.getIncompleteRowCount();
       }
     } catch (Exception e) {
       _indexCreator.close();
@@ -253,6 +249,12 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     } finally {
       _recordReader.close();
     }
+
+    if (incompleteRowsFound > 0) {
+      LOGGER.warn("Incomplete data found for {} records. This can be due to error during reader or transformations",
+          incompleteRowsFound);
+    }
+
     LOGGER.info("Finished records indexing in IndexCreator!");
 
     handlePostCreation();
@@ -394,6 +396,8 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
   void buildIndexCreationInfo()
       throws Exception {
     Set<String> varLengthDictionaryColumns = new HashSet<>(_config.getVarLengthDictionaryColumns());
+    Set<String> rawIndexCreationColumns = _config.getRawIndexCreationColumns();
+    Set<String> rawIndexCompressionTypeKeys = _config.getRawIndexCompressionType().keySet();
     for (FieldSpec fieldSpec : _dataSchema.getAllFieldSpecs()) {
       // Ignore virtual columns
       if (fieldSpec.isVirtualColumn()) {
@@ -403,19 +407,38 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
       String columnName = fieldSpec.getName();
       DataType storedType = fieldSpec.getDataType().getStoredType();
       ColumnStatistics columnProfile = _segmentStats.getColumnProfileFor(columnName);
-      boolean useVarLengthDictionary = varLengthDictionaryColumns.contains(columnName);
+      boolean useVarLengthDictionary =
+          shouldUseVarLengthDictionary(columnName, varLengthDictionaryColumns, storedType, columnProfile);
       Object defaultNullValue = fieldSpec.getDefaultNullValue();
       if (storedType == DataType.BYTES) {
-        if (!columnProfile.isFixedLength()) {
-          useVarLengthDictionary = true;
-        }
         defaultNullValue = new ByteArray((byte[]) defaultNullValue);
       }
+      boolean createDictionary = !rawIndexCreationColumns.contains(columnName)
+          && !rawIndexCompressionTypeKeys.contains(columnName);
       _indexCreationInfoMap.put(columnName,
-          new ColumnIndexCreationInfo(columnProfile, true/*createDictionary*/, useVarLengthDictionary,
+          new ColumnIndexCreationInfo(columnProfile, createDictionary, useVarLengthDictionary,
               false/*isAutoGenerated*/, defaultNullValue));
     }
     _segmentIndexCreationInfo.setTotalDocs(_totalDocs);
+  }
+
+  /**
+   * Uses config and column properties like storedType and length of elements to determine if
+   * varLengthDictionary should be used for a column
+   */
+  public static boolean shouldUseVarLengthDictionary(String columnName, Set<String> varLengthDictColumns,
+      DataType columnStoredType, ColumnStatistics columnProfile) {
+    if (varLengthDictColumns.contains(columnName)) {
+      return true;
+    }
+
+    if (columnStoredType == DataType.BYTES || columnStoredType == DataType.BIG_DECIMAL) {
+      if (!columnProfile.isFixedLength()) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**

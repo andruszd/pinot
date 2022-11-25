@@ -41,8 +41,8 @@ import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.filesystem.BasePinotFS;
 import org.apache.pinot.spi.filesystem.LocalPinotFS;
-import org.apache.pinot.spi.filesystem.PinotFS;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
@@ -70,7 +70,7 @@ import static org.testng.Assert.assertTrue;
  * (1) All the segments on all servers are in either ONLINE or CONSUMING states
  * (2) For segments failed during deep store upload, the corresponding segment download url string is empty in Zk.
  */
-public class PeerDownloadLLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegrationTest {
+public class PeerDownloadLLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegrationTest {
   private static final Logger LOGGER = LoggerFactory.getLogger(PeerDownloadLLCRealtimeClusterIntegrationTest.class);
 
   private static final String CONSUMER_DIRECTORY = "/tmp/consumer-test";
@@ -114,7 +114,8 @@ public class PeerDownloadLLCRealtimeClusterIntegrationTest extends RealtimeClust
   }
 
   @Override
-  public void startServer() {
+  public void startServer()
+      throws Exception {
     startServers(NUM_SERVERS);
   }
 
@@ -148,11 +149,6 @@ public class PeerDownloadLLCRealtimeClusterIntegrationTest extends RealtimeClust
         "org.apache.pinot.integration.tests.PeerDownloadLLCRealtimeClusterIntegrationTest$MockPinotFS");
     startController(controllerConfig);
     enableResourceConfigForLeadControllerResource(_enableLeadControllerResource);
-  }
-
-  @Override
-  protected boolean useLlc() {
-    return true;
   }
 
   @Nullable
@@ -246,7 +242,7 @@ public class PeerDownloadLLCRealtimeClusterIntegrationTest extends RealtimeClust
   }
 
   // MockPinotFS is a localPinotFS whose root directory is configured as _basePath;
-  public static class MockPinotFS extends PinotFS {
+  public static class MockPinotFS extends BasePinotFS {
     LocalPinotFS _localPinotFS = new LocalPinotFS();
     File _basePath;
 
@@ -288,10 +284,10 @@ public class PeerDownloadLLCRealtimeClusterIntegrationTest extends RealtimeClust
     }
 
     @Override
-    public boolean copy(URI srcUri, URI dstUri)
+    public boolean copyDir(URI srcUri, URI dstUri)
         throws IOException {
       try {
-        return _localPinotFS.copy(new URI(_basePath + srcUri.getPath()), new URI(_basePath + dstUri.getPath()));
+        return _localPinotFS.copyDir(new URI(_basePath + srcUri.getPath()), new URI(_basePath + dstUri.getPath()));
       } catch (URISyntaxException e) {
         throw new IllegalArgumentException(e.getMessage());
       }

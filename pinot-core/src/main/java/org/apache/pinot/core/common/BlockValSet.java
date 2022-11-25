@@ -18,9 +18,11 @@
  */
 package org.apache.pinot.core.common;
 
+import java.math.BigDecimal;
 import javax.annotation.Nullable;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.roaringbitmap.RoaringBitmap;
 
 
 /**
@@ -28,6 +30,12 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  * (Transform layer).
  */
 public interface BlockValSet {
+
+  /**
+   * Returns the null value bitmap in the value set.
+   */
+  @Nullable
+  RoaringBitmap getNullBitmap();
 
   /**
    * Returns the data type of the values in the value set.
@@ -85,6 +93,13 @@ public interface BlockValSet {
   double[] getDoubleValuesSV();
 
   /**
+   * Returns the BigDecimal values for a single-valued column.
+   *
+   * @return Array of BigDecimal values
+   */
+  BigDecimal[] getBigDecimalValuesSV();
+
+  /**
    * Returns the string values for a single-valued column.
    *
    * @return Array of string values
@@ -94,7 +109,7 @@ public interface BlockValSet {
   /**
    * Returns the byte[] values for a single-valued column.
    *
-   * @return Array of string values
+   * @return Array of byte[] values
    */
   byte[][] getBytesValuesSV();
 
@@ -143,6 +158,13 @@ public interface BlockValSet {
    * @return Array of string values
    */
   String[][] getStringValuesMV();
+
+  /**
+   * Returns the byte[] values for a multi-valued column.
+   *
+   * @return Array of byte[] values
+   */
+  byte[][][] getBytesValuesMV();
 
   /**
    * Returns the number of MV entries for a multi-valued column.

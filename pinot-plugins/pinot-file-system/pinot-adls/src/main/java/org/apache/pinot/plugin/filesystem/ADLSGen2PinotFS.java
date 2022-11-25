@@ -18,13 +18,13 @@
  */
 package org.apache.pinot.plugin.filesystem;
 
+import com.azure.core.http.ProxyOptions;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
 import com.azure.core.http.rest.PagedIterable;
 import com.azure.core.util.Context;
 import com.azure.identity.ClientSecretCredential;
 import com.azure.identity.ClientSecretCredentialBuilder;
-import com.azure.storage.blob.BlobClient;
-import com.azure.storage.blob.BlobServiceClient;
-import com.azure.storage.blob.BlobServiceClientBuilder;
+import com.azure.identity.DefaultAzureCredentialBuilder;
 import com.azure.storage.common.StorageSharedKeyCredential;
 import com.azure.storage.common.Utility;
 import com.azure.storage.file.datalake.DataLakeDirectoryClient;
@@ -39,6 +39,7 @@ import com.azure.storage.file.datalake.models.PathHttpHeaders;
 import com.azure.storage.file.datalake.models.PathItem;
 import com.azure.storage.file.datalake.models.PathProperties;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -46,20 +47,22 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.sql.Timestamp;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
-import org.apache.pinot.spi.filesystem.PinotFS;
+import org.apache.pinot.spi.filesystem.BasePinotFS;
+import org.apache.pinot.spi.filesystem.FileMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,9 +70,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Azure Data Lake Storage Gen2 implementation for the PinotFS interface.
  */
-public class ADLSGen2PinotFS extends PinotFS {
+public class ADLSGen2PinotFS extends BasePinotFS {
   private static final Logger LOGGER = LoggerFactory.getLogger(ADLSGen2PinotFS.class);
 
+  private enum AuthenticationType {
+    ACCESS_KEY, AZURE_AD, AZURE_AD_WITH_PROXY, ANONYMOUS_ACCESS
+  }
+
+  private static final String AUTHENTICATION_TYPE = "authenticationType";
   private static final String ACCOUNT_NAME = "accountName";
   private static final String ACCESS_KEY = "accessKey";
   private static final String FILE_SYSTEM_NAME = "fileSystemName";
@@ -77,6 +85,12 @@ public class ADLSGen2PinotFS extends PinotFS {
   private static final String CLIENT_ID = "clientId";
   private static final String CLIENT_SECRET = "clientSecret";
   private static final String TENANT_ID = "tenantId";
+  private static final String MANAGED_IDENTITY_CLIENT_ID = "managedIdentityClientId";
+  private static final String AUTHORITY_HOST = "authorityHost";
+  private static final String PROXY_HOST = "proxyHost";
+  private static final String PROXY_PORT = "proxyPort";
+  private static final String PROXY_USERNAME = "proxyUsername";
+  private static final String PROXY_PASSWORD = "proxyPassword";
 
   private static final String HTTPS_URL_PREFIX = "https://";
 
@@ -93,7 +107,6 @@ public class ADLSGen2PinotFS extends PinotFS {
   private static final int BUFFER_SIZE = 4 * 1024 * 1024;
 
   private DataLakeFileSystemClient _fileSystemClient;
-  private BlobServiceClient _blobServiceClient;
 
   // If enabled, pinotFS implementation will guarantee that the bits you've read are the same as the ones you wrote.
   // However, there's some overhead in computing hash. (Adds roughly 3 seconds for 1GB file)
@@ -102,9 +115,8 @@ public class ADLSGen2PinotFS extends PinotFS {
   public ADLSGen2PinotFS() {
   }
 
-  public ADLSGen2PinotFS(DataLakeFileSystemClient fileSystemClient, BlobServiceClient blobServiceClient) {
+  public ADLSGen2PinotFS(DataLakeFileSystemClient fileSystemClient) {
     _fileSystemClient = fileSystemClient;
-    _blobServiceClient = blobServiceClient;
   }
 
   @Override
@@ -115,43 +127,97 @@ public class ADLSGen2PinotFS extends PinotFS {
     String accountName = config.getProperty(ACCOUNT_NAME);
 
     // TODO: consider to add the encryption of the following config
+    String authTypeStr = config.getProperty(AUTHENTICATION_TYPE, AuthenticationType.ACCESS_KEY.name());
+    AuthenticationType authType = AuthenticationType.valueOf(authTypeStr.toUpperCase());
     String accessKey = config.getProperty(ACCESS_KEY);
     String fileSystemName = config.getProperty(FILE_SYSTEM_NAME);
     String clientId = config.getProperty(CLIENT_ID);
     String clientSecret = config.getProperty(CLIENT_SECRET);
     String tenantId = config.getProperty(TENANT_ID);
+    String managedIdentityClientId = config.getProperty(MANAGED_IDENTITY_CLIENT_ID);
+    String authorityHost = config.getProperty(AUTHORITY_HOST);
+    String proxyHost = config.getProperty(PROXY_HOST);
+    String proxyUsername = config.getProperty(PROXY_USERNAME);
+    String proxyPassword = config.getProperty(PROXY_PASSWORD);
+    String proxyPort = config.getProperty(PROXY_PORT);
 
     String dfsServiceEndpointUrl = HTTPS_URL_PREFIX + accountName + AZURE_STORAGE_DNS_SUFFIX;
-    String blobServiceEndpointUrl = HTTPS_URL_PREFIX + accountName + AZURE_BLOB_DNS_SUFFIX;
 
     DataLakeServiceClientBuilder dataLakeServiceClientBuilder =
         new DataLakeServiceClientBuilder().endpoint(dfsServiceEndpointUrl);
-    BlobServiceClientBuilder blobServiceClientBuilder = new BlobServiceClientBuilder().endpoint(blobServiceEndpointUrl);
 
-    if (accountName != null && accessKey != null) {
-      LOGGER.info("Authenticating using the access key to the account.");
-      StorageSharedKeyCredential sharedKeyCredential = new StorageSharedKeyCredential(accountName, accessKey);
-      dataLakeServiceClientBuilder.credential(sharedKeyCredential);
-      blobServiceClientBuilder.credential(sharedKeyCredential);
-    } else if (clientId != null && clientSecret != null && tenantId != null) {
-      LOGGER.info("Authenticating using Azure Active Directory");
-      ClientSecretCredential clientSecretCredential =
-          new ClientSecretCredentialBuilder().clientId(clientId).clientSecret(clientSecret).tenantId(tenantId).build();
-      dataLakeServiceClientBuilder.credential(clientSecretCredential);
-      blobServiceClientBuilder.credential(clientSecretCredential);
-    } else {
-      // Error out as at least one mode of auth info needed
-      throw new IllegalArgumentException(
-          "Expecting either (accountName, accessKey) or (clientId, clientSecret, tenantId)");
+    switch (authType) {
+      case ACCESS_KEY: {
+        LOGGER.info("Authenticating using the access key to the account.");
+        Preconditions.checkNotNull(accountName, "Account Name cannot be null");
+        Preconditions.checkNotNull(accessKey, "Access Key cannot be null");
+
+        StorageSharedKeyCredential sharedKeyCredential = new StorageSharedKeyCredential(accountName, accessKey);
+        dataLakeServiceClientBuilder.credential(sharedKeyCredential);
+        break;
+      }
+      case AZURE_AD: {
+        LOGGER.info("Authenticating using Azure Active Directory");
+        Preconditions.checkNotNull(clientId, "Client ID cannot be null");
+        Preconditions.checkNotNull(clientSecret, "ClientSecret cannot be null");
+        Preconditions.checkNotNull(tenantId, "TenantId cannot be null");
+
+        ClientSecretCredential clientSecretCredential =
+            new ClientSecretCredentialBuilder().clientId(clientId).clientSecret(clientSecret).tenantId(tenantId)
+                .build();
+        dataLakeServiceClientBuilder.credential(clientSecretCredential);
+        break;
+      }
+      case AZURE_AD_WITH_PROXY: {
+        LOGGER.info("Authenticating using Azure Active Directory with proxy");
+        Preconditions.checkNotNull(clientId, "Client Id cannot be null");
+        Preconditions.checkNotNull(clientSecret, "ClientSecret cannot be null");
+        Preconditions.checkNotNull(tenantId, "Tenant Id cannot be null");
+        Preconditions.checkNotNull(proxyHost, "Proxy Host cannot be null");
+        Preconditions.checkNotNull(proxyPort, "Proxy Port cannot be null");
+        Preconditions.checkNotNull(proxyUsername, "Proxy Username cannot be null");
+        Preconditions.checkNotNull(proxyPassword, "Proxy Password cannot be null");
+
+        NettyAsyncHttpClientBuilder builder = new NettyAsyncHttpClientBuilder();
+        builder.proxy(
+            new ProxyOptions(ProxyOptions.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort)))
+                .setCredentials(proxyUsername, proxyPassword));
+        ClientSecretCredentialBuilder clientSecretCredentialBuilder =
+            new ClientSecretCredentialBuilder().clientId(clientId).clientSecret(clientSecret).tenantId(tenantId);
+        clientSecretCredentialBuilder.httpClient(builder.build());
+
+        dataLakeServiceClientBuilder.credential(clientSecretCredentialBuilder.build());
+        break;
+      }
+      case ANONYMOUS_ACCESS: {
+        LOGGER.info("Authenticating using anonymous access");
+        break;
+      }
+      default: {
+        LOGGER.info("Authenticating using Azure default credential");
+        DefaultAzureCredentialBuilder defaultAzureCredentialBuilder = new DefaultAzureCredentialBuilder();
+        if (tenantId != null) {
+          LOGGER.info("Set tenant ID to {}", tenantId);
+          defaultAzureCredentialBuilder.tenantId(tenantId);
+        }
+        if (managedIdentityClientId != null) {
+          LOGGER.info("Set managed identity client ID to {}", managedIdentityClientId);
+          defaultAzureCredentialBuilder.managedIdentityClientId(managedIdentityClientId);
+        }
+        if (authorityHost != null) {
+          LOGGER.info("Set authority host to {}", authorityHost);
+          defaultAzureCredentialBuilder.authorityHost(authorityHost);
+        }
+        dataLakeServiceClientBuilder.credential(defaultAzureCredentialBuilder.build());
+        break;
+      }
     }
 
-    _blobServiceClient = blobServiceClientBuilder.buildClient();
     DataLakeServiceClient serviceClient = dataLakeServiceClientBuilder.buildClient();
     _fileSystemClient = getOrCreateClientWithFileSystem(serviceClient, fileSystemName);
 
     LOGGER.info("ADLSGen2PinotFS is initialized (accountName={}, fileSystemName={}, dfsServiceEndpointUrl={}, "
-            + "blobServiceEndpointUrl={}, enableChecksum={})", accountName, fileSystemName, dfsServiceEndpointUrl,
-        blobServiceEndpointUrl, _enableChecksum);
+        + "enableChecksum={})", accountName, fileSystemName, dfsServiceEndpointUrl, _enableChecksum);
   }
 
   /**
@@ -265,7 +331,7 @@ public class ADLSGen2PinotFS extends PinotFS {
    * @return true if move succeeds else false.
    */
   @Override
-  public boolean copy(URI srcUri, URI dstUri)
+  public boolean copyDir(URI srcUri, URI dstUri)
       throws IOException {
     LOGGER.debug("copy is called with srcUri='{}', dstUri='{}'", srcUri, dstUri);
     // If src and dst are the same, do nothing.
@@ -363,17 +429,40 @@ public class ADLSGen2PinotFS extends PinotFS {
       throws IOException {
     LOGGER.debug("listFiles is called with fileUri='{}', recursive='{}'", fileUri, recursive);
     try {
-      // Unlike other Azure SDK APIs that takes url encoded path, ListPathsOptions takes decoded url
-      // e.g) 'path/segment' instead of 'path%2Fsegment'
-      String pathForListPathsOptions =
-          Utility.urlDecode(AzurePinotFSUtil.convertUriToUrlEncodedAzureStylePath(fileUri));
-      ListPathsOptions options = new ListPathsOptions().setPath(pathForListPathsOptions).setRecursive(recursive);
-      PagedIterable<PathItem> iter = _fileSystemClient.listPaths(options, null);
+      PagedIterable<PathItem> iter = listPathItems(fileUri, recursive);
       return iter.stream().map(p -> AzurePinotFSUtil.convertAzureStylePathToUriStylePath(p.getName()))
           .toArray(String[]::new);
     } catch (DataLakeStorageException e) {
       throw new IOException(e);
     }
+  }
+
+  @Override
+  public List<FileMetadata> listFilesWithMetadata(URI fileUri, boolean recursive)
+      throws IOException {
+    LOGGER.debug("listFilesWithMetadata is called with fileUri='{}', recursive='{}'", fileUri, recursive);
+    try {
+      PagedIterable<PathItem> iter = listPathItems(fileUri, recursive);
+      return iter.stream().map(ADLSGen2PinotFS::getFileMetadata).collect(Collectors.toList());
+    } catch (DataLakeStorageException e) {
+      throw new IOException(e);
+    }
+  }
+
+  private PagedIterable<PathItem> listPathItems(URI fileUri, boolean recursive)
+      throws IOException {
+    // Unlike other Azure SDK APIs that takes url encoded path, ListPathsOptions takes decoded url
+    // e.g) 'path/segment' instead of 'path%2Fsegment'
+    String pathForListPathsOptions = Utility.urlDecode(AzurePinotFSUtil.convertUriToUrlEncodedAzureStylePath(fileUri));
+    ListPathsOptions options = new ListPathsOptions().setPath(pathForListPathsOptions).setRecursive(recursive);
+    return _fileSystemClient.listPaths(options, null);
+  }
+
+  private static FileMetadata getFileMetadata(PathItem file) {
+    String path = AzurePinotFSUtil.convertAzureStylePathToUriStylePath(file.getName());
+    return new FileMetadata.Builder().setFilePath(path)
+        .setLastModifiedTime(file.getLastModified().toInstant().toEpochMilli()).setLength(file.getContentLength())
+        .setIsDirectory(file.isDirectory()).build();
   }
 
   /**
@@ -469,8 +558,7 @@ public class ADLSGen2PinotFS extends PinotFS {
     try {
       PathProperties pathProperties = getPathProperties(uri);
       OffsetDateTime offsetDateTime = pathProperties.getLastModified();
-      Timestamp timestamp = Timestamp.valueOf(offsetDateTime.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
-      return timestamp.getTime();
+      return offsetDateTime.toInstant().toEpochMilli();
     } catch (DataLakeStorageException e) {
       throw new IOException("Failed while checking lastModified time for : " + uri, e);
     }
@@ -511,15 +599,8 @@ public class ADLSGen2PinotFS extends PinotFS {
   @Override
   public InputStream open(URI uri)
       throws IOException {
-    // Use Blob API since read() function from Data Lake Client currently takes "OutputStream" as an input and
-    // flush bytes to an output stream. This needs to be piped back into input stream to implement this function.
-    // On the other hand, Blob API directly allow you to open the input stream.
-    BlobClient blobClient = _blobServiceClient.getBlobContainerClient(_fileSystemClient.getFileSystemName())
-        .getBlobClient(AzurePinotFSUtil.convertUriToUrlEncodedAzureStylePath(uri));
-
-    return blobClient.openInputStream();
-    // Another approach is to download the file to the local disk to a temp path and return the file input stream. In
-    // this case, we need to override "close()" and delete temp file.
+    return _fileSystemClient.getFileClient(AzurePinotFSUtil.convertUriToUrlEncodedAzureStylePath(uri)).openInputStream()
+        .getInputStream();
   }
 
   private boolean copySrcToDst(URI srcUri, URI dstUri)

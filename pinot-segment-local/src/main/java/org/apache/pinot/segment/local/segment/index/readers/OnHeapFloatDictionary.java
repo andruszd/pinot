@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.local.segment.index.readers;
 
 import it.unimi.dsi.fastutil.floats.Float2IntOpenHashMap;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
@@ -34,7 +35,7 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  * </ul>
  * <p>This helps avoid creation of float from byte[].
  */
-public class OnHeapFloatDictionary extends OnHeapDictionary {
+public class OnHeapFloatDictionary extends BaseImmutableDictionary {
   private final Float2IntOpenHashMap _valToDictId;
   private final float[] _dictIdToVal;
 
@@ -60,13 +61,6 @@ public class OnHeapFloatDictionary extends OnHeapDictionary {
   }
 
   @Override
-  public int insertionIndexOf(String stringValue) {
-    float floatValue = Float.parseFloat(stringValue);
-    int index = _valToDictId.get(floatValue);
-    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, floatValue);
-  }
-
-  @Override
   public DataType getValueType() {
     return DataType.FLOAT;
   }
@@ -74,6 +68,18 @@ public class OnHeapFloatDictionary extends OnHeapDictionary {
   @Override
   public int indexOf(String stringValue) {
     return _valToDictId.get(Float.parseFloat(stringValue));
+  }
+
+  @Override
+  public int indexOf(float floatValue) {
+    return _valToDictId.get(floatValue);
+  }
+
+  @Override
+  public int insertionIndexOf(String stringValue) {
+    float floatValue = Float.parseFloat(stringValue);
+    int index = _valToDictId.get(floatValue);
+    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, floatValue);
   }
 
   @Override
@@ -99,6 +105,11 @@ public class OnHeapFloatDictionary extends OnHeapDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return _dictIdToVal[dictId];
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(_dictIdToVal[dictId]);
   }
 
   @Override

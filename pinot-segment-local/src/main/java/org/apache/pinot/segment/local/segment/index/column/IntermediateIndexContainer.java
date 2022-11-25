@@ -24,8 +24,8 @@ import java.util.Set;
 import javax.annotation.Nullable;
 import org.apache.pinot.segment.local.segment.index.datasource.MutableDataSource;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.index.reader.MutableDictionary;
-import org.apache.pinot.segment.spi.index.reader.MutableForwardIndex;
+import org.apache.pinot.segment.spi.index.mutable.MutableDictionary;
+import org.apache.pinot.segment.spi.index.mutable.MutableForwardIndex;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.slf4j.Logger;
@@ -62,8 +62,8 @@ public class IntermediateIndexContainer implements Closeable {
 
   public DataSource toDataSource(int numDocsIndexed) {
     return new MutableDataSource(_fieldSpec, numDocsIndexed, _numValuesInfo._numValues,
-        _numValuesInfo._maxNumValuesPerMVEntry, _partitionFunction, _partitions, _minValue, _maxValue, _forwardIndex,
-        _dictionary, null, null, null, false, null, null, null, null);
+        _numValuesInfo._maxNumValuesPerMVEntry, _dictionary.length(), _partitionFunction, _partitions, _minValue,
+        _maxValue, _forwardIndex, _dictionary, null, null, null, null, null, null, null, null);
   }
 
   @Override

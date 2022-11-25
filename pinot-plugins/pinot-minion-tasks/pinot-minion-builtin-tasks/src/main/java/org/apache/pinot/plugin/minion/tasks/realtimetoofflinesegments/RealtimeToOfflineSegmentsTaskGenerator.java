@@ -26,12 +26,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.helix.ZNRecord;
 import org.apache.helix.task.TaskState;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.minion.RealtimeToOfflineSegmentsTaskMetadata;
 import org.apache.pinot.common.utils.LLCSegmentName;
-import org.apache.pinot.controller.helix.core.minion.ClusterInfoAccessor;
+import org.apache.pinot.controller.helix.core.minion.generator.BaseTaskGenerator;
 import org.apache.pinot.controller.helix.core.minion.generator.PinotTaskGenerator;
 import org.apache.pinot.controller.helix.core.minion.generator.TaskGeneratorUtils;
 import org.apache.pinot.core.common.MinionConstants;
@@ -57,7 +57,7 @@ import org.slf4j.LoggerFactory;
  *
  * Steps:
  *  - The watermarkMs is read from the {@link RealtimeToOfflineSegmentsTaskMetadata} ZNode
- *  found at MINION_TASK_METADATA/RealtimeToOfflineSegmentsTask/tableNameWithType
+ *  found at MINION_TASK_METADATA/${tableNameWithType}/RealtimeToOfflineSegmentsTask
  *  In case of cold-start, no ZNode will exist.
  *  A new ZNode will be created, with watermarkMs as the smallest time found in the COMPLETED segments
  *
@@ -77,18 +77,11 @@ import org.slf4j.LoggerFactory;
  *  - A PinotTaskConfig is created, with segment information, execution window, and any config specific to the task
  */
 @TaskGenerator
-public class RealtimeToOfflineSegmentsTaskGenerator implements PinotTaskGenerator {
+public class RealtimeToOfflineSegmentsTaskGenerator extends BaseTaskGenerator {
   private static final Logger LOGGER = LoggerFactory.getLogger(RealtimeToOfflineSegmentsTaskGenerator.class);
 
   private static final String DEFAULT_BUCKET_PERIOD = "1d";
   private static final String DEFAULT_BUFFER_PERIOD = "2d";
-
-  private ClusterInfoAccessor _clusterInfoAccessor;
-
-  @Override
-  public void init(ClusterInfoAccessor clusterInfoAccessor) {
-    _clusterInfoAccessor = clusterInfoAccessor;
-  }
 
   @Override
   public String getTaskType() {
@@ -119,29 +112,27 @@ public class RealtimeToOfflineSegmentsTaskGenerator implements PinotTaskGenerato
       Map<String, TaskState> incompleteTasks =
           TaskGeneratorUtils.getIncompleteTasks(taskType, realtimeTableName, _clusterInfoAccessor);
       if (!incompleteTasks.isEmpty()) {
-        LOGGER
-            .warn("Found incomplete tasks: {} for same table: {}. Skipping task generation.", incompleteTasks.keySet(),
-                realtimeTableName);
+        LOGGER.warn("Found incomplete tasks: {} for same table: {}. Skipping task generation.",
+            incompleteTasks.keySet(), realtimeTableName);
         continue;
       }
 
-      // Get all segment metadata for completed segments (DONE status).
+      // Get all segment metadata for completed segments (DONE/UPLOADED status).
       List<SegmentZKMetadata> completedSegmentsZKMetadata = new ArrayList<>();
-      Map<Integer, String> partitionToLatestCompletedSegmentName = new HashMap<>();
+      Map<Integer, String> partitionToLatestLLCSegmentName = new HashMap<>();
       Set<Integer> allPartitions = new HashSet<>();
-      getCompletedSegmentsInfo(realtimeTableName, completedSegmentsZKMetadata, partitionToLatestCompletedSegmentName,
+      getCompletedSegmentsInfo(realtimeTableName, completedSegmentsZKMetadata, partitionToLatestLLCSegmentName,
           allPartitions);
       if (completedSegmentsZKMetadata.isEmpty()) {
-        LOGGER
-            .info("No realtime-completed segments found for table: {}, skipping task generation: {}", realtimeTableName,
-                taskType);
+        LOGGER.info("No realtime-completed segments found for table: {}, skipping task generation: {}",
+            realtimeTableName, taskType);
         continue;
       }
-      allPartitions.removeAll(partitionToLatestCompletedSegmentName.keySet());
+      allPartitions.removeAll(partitionToLatestLLCSegmentName.keySet());
       if (!allPartitions.isEmpty()) {
-        LOGGER
-            .info("Partitions: {} have no completed segments. Table: {} is not ready for {}. Skipping task generation.",
-                allPartitions, realtimeTableName, taskType);
+        LOGGER.info(
+            "Partitions: {} have no completed segments. Table: {} is not ready for {}. Skipping task generation.",
+            allPartitions, realtimeTableName, taskType);
         continue;
       }
 
@@ -163,47 +154,53 @@ public class RealtimeToOfflineSegmentsTaskGenerator implements PinotTaskGenerato
       long windowStartMs = getWatermarkMs(realtimeTableName, completedSegmentsZKMetadata, bucketMs);
       long windowEndMs = windowStartMs + bucketMs;
 
-      // Check that execution window is older than bufferTime
-      if (windowEndMs > System.currentTimeMillis() - bufferMs) {
-        LOGGER.info(
-            "Window with start: {} and end: {} is not older than buffer time: {} configured as {} ago. Skipping task "
-                + "generation: {}",
-            windowStartMs, windowEndMs, bufferMs, bufferTimePeriod, taskType);
-        continue;
-      }
-
       // Find all COMPLETED segments with data overlapping execution window: windowStart (inclusive) to windowEnd
       // (exclusive)
       List<String> segmentNames = new ArrayList<>();
       List<String> downloadURLs = new ArrayList<>();
-      Set<String> lastCompletedSegmentPerPartition = new HashSet<>(partitionToLatestCompletedSegmentName.values());
+      Set<String> lastLLCSegmentPerPartition = new HashSet<>(partitionToLatestLLCSegmentName.values());
       boolean skipGenerate = false;
-      for (SegmentZKMetadata segmentZKMetadata : completedSegmentsZKMetadata) {
-        String segmentName = segmentZKMetadata.getSegmentName();
-        long segmentStartTimeMs = segmentZKMetadata.getStartTimeMs();
-        long segmentEndTimeMs = segmentZKMetadata.getEndTimeMs();
-
-        // Check overlap with window
-        if (windowStartMs <= segmentEndTimeMs && segmentStartTimeMs < windowEndMs) {
-          // If last completed segment is being used, make sure that segment crosses over end of window.
-          // In the absence of this check, CONSUMING segments could contain some portion of the window. That data
-          // would be skipped forever.
-          if (lastCompletedSegmentPerPartition.contains(segmentName) && segmentEndTimeMs < windowEndMs) {
-            LOGGER.info(
-                "Window data overflows into CONSUMING segments for partition of segment: {}. Skipping task "
-                    + "generation: {}",
-                segmentName, taskType);
-            skipGenerate = true;
-            break;
-          }
-          segmentNames.add(segmentName);
-          downloadURLs.add(segmentZKMetadata.getDownloadUrl());
+      while (true) {
+        // Check that execution window is older than bufferTime
+        if (windowEndMs > System.currentTimeMillis() - bufferMs) {
+          LOGGER.info(
+              "Window with start: {} and end: {} is not older than buffer time: {} configured as {} ago. Skipping task "
+                  + "generation: {}", windowStartMs, windowEndMs, bufferMs, bufferTimePeriod, taskType);
+          skipGenerate = true;
+          break;
         }
+
+        for (SegmentZKMetadata segmentZKMetadata : completedSegmentsZKMetadata) {
+          String segmentName = segmentZKMetadata.getSegmentName();
+          long segmentStartTimeMs = segmentZKMetadata.getStartTimeMs();
+          long segmentEndTimeMs = segmentZKMetadata.getEndTimeMs();
+
+          // Check overlap with window
+          if (windowStartMs <= segmentEndTimeMs && segmentStartTimeMs < windowEndMs) {
+            // If last completed segment is being used, make sure that segment crosses over end of window.
+            // In the absence of this check, CONSUMING segments could contain some portion of the window. That data
+            // would be skipped forever.
+            if (lastLLCSegmentPerPartition.contains(segmentName) && segmentEndTimeMs < windowEndMs) {
+              LOGGER.info("Window data overflows into CONSUMING segments for partition of segment: {}. Skipping task "
+                  + "generation: {}", segmentName, taskType);
+              skipGenerate = true;
+              break;
+            }
+            segmentNames.add(segmentName);
+            downloadURLs.add(segmentZKMetadata.getDownloadUrl());
+          }
+        }
+        if (skipGenerate || !segmentNames.isEmpty()) {
+          break;
+        }
+
+        LOGGER.info("Found no eligible segments for task: {} with window [{} - {}), moving to the next time bucket",
+            taskType, windowStartMs, windowEndMs);
+        windowStartMs = windowEndMs;
+        windowEndMs += bucketMs;
       }
 
-      if (segmentNames.isEmpty() || skipGenerate) {
-        LOGGER.info("Found no eligible segments for task: {} with window [{} - {}). Skipping task generation", taskType,
-            windowStartMs, windowEndMs);
+      if (skipGenerate) {
         continue;
       }
 
@@ -246,41 +243,44 @@ public class RealtimeToOfflineSegmentsTaskGenerator implements PinotTaskGenerato
   }
 
   /**
-   * Fetch completed (non-consuming) segment and partition information
+   * Fetch completed (DONE/UPLOADED) segment and partition information
+   *
    * @param realtimeTableName the realtime table name
-   * @param completedSegmentsZKMetadata list for collecting the completed segments ZK metadata
-   * @param partitionToLatestCompletedSegmentName map for collecting the partitionId to the latest completed segment
-   *                                              name
+   * @param completedSegmentsZKMetadata list for collecting the completed (DONE/UPLOADED) segments ZK metadata
+   * @param partitionToLatestLLCSegmentName map for collecting the partitionId to the latest LLC segment name
    * @param allPartitions set for collecting all partition ids
    */
   private void getCompletedSegmentsInfo(String realtimeTableName, List<SegmentZKMetadata> completedSegmentsZKMetadata,
-      Map<Integer, String> partitionToLatestCompletedSegmentName, Set<Integer> allPartitions) {
+      Map<Integer, String> partitionToLatestLLCSegmentName, Set<Integer> allPartitions) {
     List<SegmentZKMetadata> segmentsZKMetadata = _clusterInfoAccessor.getSegmentsZKMetadata(realtimeTableName);
 
     Map<Integer, LLCSegmentName> latestLLCSegmentNameMap = new HashMap<>();
     for (SegmentZKMetadata segmentZKMetadata : segmentsZKMetadata) {
-      LLCSegmentName llcSegmentName = new LLCSegmentName(segmentZKMetadata.getSegmentName());
-      allPartitions.add(llcSegmentName.getPartitionGroupId());
-
-      if (segmentZKMetadata.getStatus().equals(Segment.Realtime.Status.DONE)) {
+      Segment.Realtime.Status status = segmentZKMetadata.getStatus();
+      if (status.isCompleted()) {
         completedSegmentsZKMetadata.add(segmentZKMetadata);
-        latestLLCSegmentNameMap
-            .compute(llcSegmentName.getPartitionGroupId(), (partitionGroupId, latestLLCSegmentName) -> {
-              if (latestLLCSegmentName == null) {
-                return llcSegmentName;
-              } else {
-                if (llcSegmentName.getSequenceNumber() > latestLLCSegmentName.getSequenceNumber()) {
-                  return llcSegmentName;
-                } else {
-                  return latestLLCSegmentName;
-                }
-              }
-            });
+      }
+
+      // Skip UPLOADED segments that don't conform to the LLC segment name
+      LLCSegmentName llcSegmentName = LLCSegmentName.of(segmentZKMetadata.getSegmentName());
+      if (llcSegmentName != null) {
+        int partitionId = llcSegmentName.getPartitionGroupId();
+        allPartitions.add(partitionId);
+        if (status.isCompleted()) {
+          latestLLCSegmentNameMap.compute(partitionId, (k, latestLLCSegmentName) -> {
+            if (latestLLCSegmentName == null
+                || llcSegmentName.getSequenceNumber() > latestLLCSegmentName.getSequenceNumber()) {
+              return llcSegmentName;
+            } else {
+              return latestLLCSegmentName;
+            }
+          });
+        }
       }
     }
 
     for (Map.Entry<Integer, LLCSegmentName> entry : latestLLCSegmentNameMap.entrySet()) {
-      partitionToLatestCompletedSegmentName.put(entry.getKey(), entry.getValue().getSegmentName());
+      partitionToLatestLLCSegmentName.put(entry.getKey(), entry.getValue().getSegmentName());
     }
   }
 
@@ -291,11 +291,12 @@ public class RealtimeToOfflineSegmentsTaskGenerator implements PinotTaskGenerato
    */
   private long getWatermarkMs(String realtimeTableName, List<SegmentZKMetadata> completedSegmentsZKMetadata,
       long bucketMs) {
-    ZNRecord realtimeToOfflineZNRecord = _clusterInfoAccessor
-        .getMinionTaskMetadataZNRecord(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE, realtimeTableName);
+    ZNRecord realtimeToOfflineZNRecord =
+        _clusterInfoAccessor.getMinionTaskMetadataZNRecord(MinionConstants.RealtimeToOfflineSegmentsTask.TASK_TYPE,
+            realtimeTableName);
     RealtimeToOfflineSegmentsTaskMetadata realtimeToOfflineSegmentsTaskMetadata =
-        realtimeToOfflineZNRecord != null ? RealtimeToOfflineSegmentsTaskMetadata
-            .fromZNRecord(realtimeToOfflineZNRecord) : null;
+        realtimeToOfflineZNRecord != null ? RealtimeToOfflineSegmentsTaskMetadata.fromZNRecord(
+            realtimeToOfflineZNRecord) : null;
 
     if (realtimeToOfflineSegmentsTaskMetadata == null) {
       // No ZNode exists. Cold-start.

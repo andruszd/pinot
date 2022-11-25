@@ -18,11 +18,16 @@
  */
 package org.apache.pinot.server.api.resources;
 
+import com.google.common.base.Preconditions;
 import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiKeyAuthDefinition;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import io.swagger.annotations.ApiResponse;
 import io.swagger.annotations.ApiResponses;
+import io.swagger.annotations.Authorization;
+import io.swagger.annotations.SecurityDefinition;
+import io.swagger.annotations.SwaggerDefinition;
 import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
@@ -36,7 +41,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.Encoded;
 import javax.ws.rs.GET;
@@ -52,13 +59,18 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.StreamingOutput;
 import org.apache.commons.io.FileUtils;
+import org.apache.helix.model.IdealState;
+import org.apache.pinot.common.metadata.ZKMetadataProvider;
+import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.restlet.resources.ResourceUtils;
 import org.apache.pinot.common.restlet.resources.SegmentConsumerInfo;
 import org.apache.pinot.common.restlet.resources.TableMetadataInfo;
+import org.apache.pinot.common.restlet.resources.TableSegmentValidationInfo;
 import org.apache.pinot.common.restlet.resources.TableSegments;
 import org.apache.pinot.common.restlet.resources.TablesList;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.helix.HelixHelper;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
 import org.apache.pinot.core.data.manager.offline.ImmutableSegmentDataManager;
 import org.apache.pinot.core.data.manager.realtime.RealtimeSegmentDataManager;
@@ -68,18 +80,28 @@ import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
-import org.apache.pinot.server.api.access.AccessControl;
-import org.apache.pinot.server.api.access.AccessControlFactory;
+import org.apache.pinot.segment.spi.store.ColumnIndexType;
+import org.apache.pinot.server.access.AccessControl;
+import org.apache.pinot.server.access.AccessControlFactory;
+import org.apache.pinot.server.access.HttpRequesterIdentity;
+import org.apache.pinot.server.access.RequesterIdentity;
 import org.apache.pinot.server.starter.ServerInstance;
+import org.apache.pinot.server.starter.helix.AdminApiApplication;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.stream.ConsumerPartitionState;
+import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
-@Api(tags = "Table")
+
+@Api(tags = "Table", authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
+    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
 @Path("/")
 public class TablesResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(TablesResource.class);
@@ -91,6 +113,10 @@ public class TablesResource {
 
   @Inject
   private AccessControlFactory _accessControlFactory;
+
+  @Inject
+  @Named(AdminApiApplication.SERVER_INSTANCE_ID)
+  private String _instanceId;
 
   @GET
   @Path("/tables")
@@ -184,6 +210,8 @@ public class TablesResource {
     long totalNumRows = 0;
     Map<String, Double> columnLengthMap = new HashMap<>();
     Map<String, Double> columnCardinalityMap = new HashMap<>();
+    Map<String, Double> maxNumMultiValuesMap = new HashMap<>();
+    Map<String, Map<String, Double>> columnIndexSizesMap = new HashMap<>();
     try {
       for (SegmentDataManager segmentDataManager : segmentDataManagers) {
         if (segmentDataManager instanceof ImmutableSegmentDataManager) {
@@ -202,7 +230,7 @@ public class TablesResource {
           }
           for (String column : columnSet) {
             ColumnMetadata columnMetadata = segmentMetadata.getColumnMetadataMap().get(column);
-            int columnLength;
+            int columnLength = 0;
             DataType storedDataType = columnMetadata.getDataType().getStoredType();
             if (storedDataType.isFixedWidth()) {
               // For type of fixed width: INT, LONG, FLOAT, DOUBLE, BOOLEAN (stored as INT), TIMESTAMP (stored as LONG),
@@ -210,21 +238,33 @@ public class TablesResource {
               columnLength = storedDataType.size();
             } else if (columnMetadata.hasDictionary()) {
               // For type of variable width (String, Bytes), if it's stored using dictionary encoding, set the
-              // columnLength as the max
-              // length in dictionary.
+              // columnLength as the max length in dictionary.
               columnLength = columnMetadata.getColumnMaxLength();
             } else if (storedDataType == DataType.STRING || storedDataType == DataType.BYTES) {
               // For type of variable width (String, Bytes), if it's stored using raw bytes, set the columnLength as
-              // the length
-              // of the max value.
-              columnLength = ((String) columnMetadata.getMaxValue()).getBytes(StandardCharsets.UTF_8).length;
+              // the length of the max value.
+              if (columnMetadata.getMaxValue() != null) {
+                String maxValueString = (String) columnMetadata.getMaxValue();
+                columnLength = maxValueString.getBytes(StandardCharsets.UTF_8).length;
+              }
             } else {
               // For type of STRUCT, MAP, LIST, set the columnLength as DEFAULT_MAX_LENGTH (512).
               columnLength = FieldSpec.DEFAULT_MAX_LENGTH;
             }
-            int columnCardinality = segmentMetadata.getColumnMetadataMap().get(column).getCardinality();
+            int columnCardinality = columnMetadata.getCardinality();
             columnLengthMap.merge(column, (double) columnLength, Double::sum);
             columnCardinalityMap.merge(column, (double) columnCardinality, Double::sum);
+            if (!columnMetadata.isSingleValue()) {
+              int maxNumMultiValues = columnMetadata.getMaxNumberOfMultiValues();
+              maxNumMultiValuesMap.merge(column, (double) maxNumMultiValues, Double::sum);
+            }
+            for (Map.Entry<ColumnIndexType, Long> entry : columnMetadata.getIndexSizeMap().entrySet()) {
+              String indexName = entry.getKey().getIndexName();
+              Map<String, Double> columnIndexSizes = columnIndexSizesMap.getOrDefault(column, new HashMap<>());
+              Double indexSize = columnIndexSizes.getOrDefault(indexName, 0d) + entry.getValue();
+              columnIndexSizes.put(indexName, indexSize);
+              columnIndexSizesMap.put(column, columnIndexSizes);
+            }
           }
         }
       }
@@ -239,7 +279,7 @@ public class TablesResource {
 
     TableMetadataInfo tableMetadataInfo =
         new TableMetadataInfo(tableDataManager.getTableName(), totalSegmentSizeBytes, segmentDataManagers.size(),
-            totalNumRows, columnLengthMap, columnCardinalityMap);
+            totalNumRows, columnLengthMap, columnCardinalityMap, maxNumMultiValuesMap, columnIndexSizesMap);
     return ResourceUtils.convertToJsonString(tableMetadataInfo);
   }
 
@@ -259,6 +299,14 @@ public class TablesResource {
       @ApiParam(value = "Segment name", required = true) @PathParam("segmentName") String segmentName,
       @ApiParam(value = "Column name", allowMultiple = true) @QueryParam("columns") @DefaultValue("")
           List<String> columns) {
+    for (int i = 0; i < columns.size(); i++) {
+      try {
+        columns.set(i, URLDecoder.decode(columns.get(i), StandardCharsets.UTF_8.name()));
+      } catch (UnsupportedEncodingException e) {
+        throw new RuntimeException(e.getCause());
+      }
+    }
+
     TableDataManager tableDataManager = ServerResourceUtils.checkGetTableDataManager(_serverInstance, tableName);
     try {
       segmentName = URLDecoder.decode(segmentName, StandardCharsets.UTF_8.name());
@@ -269,14 +317,6 @@ public class TablesResource {
     if (segmentDataManager == null) {
       throw new WebApplicationException(String.format("Table %s segments %s does not exist", tableName, segmentName),
           Response.Status.NOT_FOUND);
-    }
-
-    for (int i = 0; i < columns.size(); i++) {
-      try {
-        columns.set(i, URLDecoder.decode(columns.get(i), StandardCharsets.UTF_8.name()));
-      } catch (UnsupportedEncodingException e) {
-        throw new RuntimeException(e.getCause());
-      }
     }
 
     try {
@@ -337,7 +377,8 @@ public class TablesResource {
     boolean hasDataAccess;
     try {
       AccessControl accessControl = _accessControlFactory.create();
-      hasDataAccess = accessControl.hasDataAccess(httpHeaders, tableNameWithType);
+      RequesterIdentity httpRequestIdentity = new HttpRequesterIdentity(httpHeaders);
+      hasDataAccess = accessControl.hasDataAccess(httpRequestIdentity, tableNameWithType);
     } catch (Exception e) {
       throw new WebApplicationException("Caught exception while validating access to table: " + tableNameWithType,
           Response.Status.INTERNAL_SERVER_ERROR);
@@ -462,11 +503,12 @@ public class TablesResource {
   @Path("tables/{realtimeTableName}/consumingSegmentsInfo")
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get the info for consumers of this REALTIME table",
-      notes = "Get consumers info from the table data manager")
+      notes = "Get consumers info from the table data manager. Note that the partitionToOffsetMap has been deprecated "
+          + "and will be removed in the next release. The info is now embedded within each partition's state as "
+          + "currentOffsetsMap")
   public List<SegmentConsumerInfo> getConsumingSegmentsInfo(
       @ApiParam(value = "Name of the REALTIME table", required = true) @PathParam("realtimeTableName")
           String realtimeTableName) {
-
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(realtimeTableName);
     if (TableType.OFFLINE == tableType) {
       throw new WebApplicationException("Cannot get consuming segment info for OFFLINE table: " + realtimeTableName);
@@ -481,11 +523,26 @@ public class TablesResource {
       for (SegmentDataManager segmentDataManager : segmentDataManagers) {
         if (segmentDataManager instanceof RealtimeSegmentDataManager) {
           RealtimeSegmentDataManager realtimeSegmentDataManager = (RealtimeSegmentDataManager) segmentDataManager;
-          String segmentName = segmentDataManager.getSegmentName();
+          Map<String, ConsumerPartitionState> partitionStateMap =
+              realtimeSegmentDataManager.getConsumerPartitionState();
+          Map<String, String> recordsLagMap = new HashMap<>();
+          Map<String, String> availabilityLagMsMap = new HashMap<>();
+          realtimeSegmentDataManager.getPartitionToLagState(partitionStateMap).forEach((k, v) -> {
+            recordsLagMap.put(k, v.getRecordsLag());
+            availabilityLagMsMap.put(k, v.getAvailabilityLagMs());
+          });
+          @Deprecated Map<String, String> partitiionToOffsetMap =
+              realtimeSegmentDataManager.getPartitionToCurrentOffset();
           segmentConsumerInfoList.add(
-              new SegmentConsumerInfo(segmentName, realtimeSegmentDataManager.getConsumerState().toString(),
+              new SegmentConsumerInfo(segmentDataManager.getSegmentName(),
+                  realtimeSegmentDataManager.getConsumerState().toString(),
                   realtimeSegmentDataManager.getLastConsumedTimestamp(),
-                  realtimeSegmentDataManager.getPartitionToCurrentOffset()));
+                  partitiionToOffsetMap,
+                  new SegmentConsumerInfo.PartitionOffsetInfo(
+                      partitiionToOffsetMap,
+                      partitionStateMap.entrySet().stream().collect(
+                          Collectors.toMap(Map.Entry::getKey, e -> e.getValue().getUpstreamLatestOffset().toString())
+                      ), recordsLagMap, availabilityLagMsMap)));
         }
       }
     } catch (Exception e) {
@@ -496,5 +553,61 @@ public class TablesResource {
       }
     }
     return segmentConsumerInfoList;
+  }
+
+  @GET
+  @Path("tables/{tableNameWithType}/allSegmentsLoaded")
+  @Produces(MediaType.APPLICATION_JSON)
+  @ApiOperation(value = "Validates if the ideal state matches with the segment state on this server", notes =
+      "Validates if the ideal state matches with the segment state on this server")
+  public TableSegmentValidationInfo validateTableSegmentState(
+      @ApiParam(value = "Name of the table", required = true) @PathParam("tableNameWithType")
+      String tableNameWithType) {
+    // Get table current ideal state
+    IdealState tableIdealState = HelixHelper.getTableIdealState(_serverInstance.getHelixManager(), tableNameWithType);
+    TableDataManager tableDataManager =
+        ServerResourceUtils.checkGetTableDataManager(_serverInstance, tableNameWithType);
+
+    // Validate segments in ideal state which belong to this server
+    long maxEndTimeMs = -1;
+    Map<String, Map<String, String>> instanceStatesMap = tableIdealState.getRecord().getMapFields();
+    for (Map.Entry<String, Map<String, String>> entry : instanceStatesMap.entrySet()) {
+      String segmentState = entry.getValue().get(_instanceId);
+      if (segmentState != null) {
+        // Segment hosted by this server. Validate segment state
+        String segmentName = entry.getKey();
+        SegmentDataManager segmentDataManager = tableDataManager.acquireSegment(segmentName);
+        try {
+          switch (segmentState) {
+            case SegmentStateModel.CONSUMING:
+              // Only validate presence of segment
+              if (segmentDataManager == null) {
+                return new TableSegmentValidationInfo(false, -1);
+              }
+              break;
+            case SegmentStateModel.ONLINE:
+              // Validate segment CRC
+              SegmentZKMetadata zkMetadata =
+                  ZKMetadataProvider.getSegmentZKMetadata(_serverInstance.getHelixManager().getHelixPropertyStore(),
+                      tableNameWithType, segmentName);
+              Preconditions.checkState(zkMetadata != null,
+                  "Segment zk metadata not found for segment : " + segmentName);
+              if (segmentDataManager == null || !segmentDataManager.getSegment().getSegmentMetadata().getCrc()
+                  .equals(String.valueOf(zkMetadata.getCrc()))) {
+                return new TableSegmentValidationInfo(false, -1);
+              }
+              maxEndTimeMs = Math.max(maxEndTimeMs, zkMetadata.getEndTimeMs());
+              break;
+            default:
+              break;
+          }
+        } finally {
+          if (segmentDataManager != null) {
+            tableDataManager.releaseSegment(segmentDataManager);
+          }
+        }
+      }
+    }
+    return new TableSegmentValidationInfo(true, maxEndTimeMs);
   }
 }

@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.Header;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -55,16 +56,21 @@ public class OperateClusterConfigCommand extends AbstractBaseAdminCommand implem
   @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
   private String _authToken;
 
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
+
   @CommandLine.Option(names = {"-config"}, description = "Cluster config to operate.")
   private String _config;
 
-  @CommandLine.Option(names = {"-operation"}, required = true, 
+  @CommandLine.Option(names = {"-operation"}, required = true,
       description = "Operation to take for Cluster config, currently support GET/ADD/UPDATE/DELETE.")
   private String _operation;
 
   @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
       description = "Print this message.")
   private boolean _help = false;
+
+  private AuthProvider _authProvider;
 
   @Override
   public boolean getHelp() {
@@ -89,7 +95,6 @@ public class OperateClusterConfigCommand extends AbstractBaseAdminCommand implem
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -123,11 +128,6 @@ public class OperateClusterConfigCommand extends AbstractBaseAdminCommand implem
     return this;
   }
 
-  public OperateClusterConfigCommand setAuthToken(String authToken) {
-    _authToken = authToken;
-    return this;
-  }
-
   public OperateClusterConfigCommand setConfig(String config) {
     _config = config;
     return this;
@@ -135,6 +135,11 @@ public class OperateClusterConfigCommand extends AbstractBaseAdminCommand implem
 
   public OperateClusterConfigCommand setOperation(String operation) {
     _operation = operation;
+    return this;
+  }
+
+  public OperateClusterConfigCommand setAuthProvider(AuthProvider authProvider) {
+    _authProvider = authProvider;
     return this;
   }
 
@@ -149,7 +154,8 @@ public class OperateClusterConfigCommand extends AbstractBaseAdminCommand implem
     }
     String clusterConfigUrl =
         _controllerProtocol + "://" + _controllerHost + ":" + _controllerPort + "/cluster/configs";
-    List<Header> headers = makeAuthHeader(makeAuthToken(_authToken, _user, _password));
+    List<Header> headers = makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user,
+        _password));
     switch (_operation.toUpperCase()) {
       case "ADD":
       case "UPDATE":

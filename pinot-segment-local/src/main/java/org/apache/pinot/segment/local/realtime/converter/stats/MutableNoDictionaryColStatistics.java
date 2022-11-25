@@ -18,11 +18,13 @@
  */
 package org.apache.pinot.segment.local.realtime.converter.stats;
 
+import com.google.common.base.Preconditions;
+import java.util.Map;
 import java.util.Set;
 import org.apache.pinot.segment.spi.creator.ColumnStatistics;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.datasource.DataSourceMetadata;
-import org.apache.pinot.segment.spi.index.reader.MutableForwardIndex;
+import org.apache.pinot.segment.spi.index.mutable.MutableForwardIndex;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
 
 import static org.apache.pinot.segment.spi.Constants.UNKNOWN_CARDINALITY;
@@ -35,6 +37,8 @@ public class MutableNoDictionaryColStatistics implements ColumnStatistics {
   public MutableNoDictionaryColStatistics(DataSource dataSource) {
     _dataSourceMetadata = dataSource.getDataSourceMetadata();
     _forwardIndex = (MutableForwardIndex) dataSource.getForwardIndex();
+    Preconditions.checkState(_forwardIndex != null,
+        String.format("Forward index should not be null for column: %s", _dataSourceMetadata.getFieldSpec().getName()));
   }
 
   @Override
@@ -83,11 +87,6 @@ public class MutableNoDictionaryColStatistics implements ColumnStatistics {
   }
 
   @Override
-  public boolean hasNull() {
-    return false;
-  }
-
-  @Override
   public PartitionFunction getPartitionFunction() {
     return _dataSourceMetadata.getPartitionFunction();
   }
@@ -100,6 +99,12 @@ public class MutableNoDictionaryColStatistics implements ColumnStatistics {
     } else {
       return 0;
     }
+  }
+
+  @Override
+  public Map<String, String> getPartitionFunctionConfig() {
+    PartitionFunction partitionFunction = _dataSourceMetadata.getPartitionFunction();
+    return partitionFunction != null ? partitionFunction.getFunctionConfig() : null;
   }
 
   @Override

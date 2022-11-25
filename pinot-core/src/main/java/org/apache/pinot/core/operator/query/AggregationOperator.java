@@ -18,10 +18,13 @@
  */
 package org.apache.pinot.core.operator.query;
 
+import java.util.Collections;
+import java.util.List;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.core.operator.ExecutionStatistics;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
 import org.apache.pinot.core.operator.blocks.TransformBlock;
+import org.apache.pinot.core.operator.blocks.results.AggregationResultsBlock;
 import org.apache.pinot.core.operator.transform.TransformOperator;
 import org.apache.pinot.core.query.aggregation.AggregationExecutor;
 import org.apache.pinot.core.query.aggregation.DefaultAggregationExecutor;
@@ -33,8 +36,8 @@ import org.apache.pinot.core.startree.executor.StarTreeAggregationExecutor;
  * The <code>AggregationOperator</code> class provides the operator for aggregation only query on a single segment.
  */
 @SuppressWarnings("rawtypes")
-public class AggregationOperator extends BaseOperator<IntermediateResultsBlock> {
-  private static final String OPERATOR_NAME = "AggregationOperator";
+public class AggregationOperator extends BaseOperator<AggregationResultsBlock> {
+  private static final String EXPLAIN_NAME = "AGGREGATE";
 
   private final AggregationFunction[] _aggregationFunctions;
   private final TransformOperator _transformOperator;
@@ -52,7 +55,7 @@ public class AggregationOperator extends BaseOperator<IntermediateResultsBlock> 
   }
 
   @Override
-  protected IntermediateResultsBlock getNextBlock() {
+  protected AggregationResultsBlock getNextBlock() {
     // Perform aggregation on all the transform blocks
     AggregationExecutor aggregationExecutor;
     if (_useStarTree) {
@@ -67,12 +70,12 @@ public class AggregationOperator extends BaseOperator<IntermediateResultsBlock> 
     }
 
     // Build intermediate result block based on aggregation result from the executor
-    return new IntermediateResultsBlock(_aggregationFunctions, aggregationExecutor.getResult(), false);
+    return new AggregationResultsBlock(_aggregationFunctions, aggregationExecutor.getResult());
   }
 
   @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
+  public List<Operator> getChildOperators() {
+    return Collections.singletonList(_transformOperator);
   }
 
   @Override
@@ -81,5 +84,18 @@ public class AggregationOperator extends BaseOperator<IntermediateResultsBlock> 
     long numEntriesScannedPostFilter = (long) _numDocsScanned * _transformOperator.getNumColumnsProjected();
     return new ExecutionStatistics(_numDocsScanned, numEntriesScannedInFilter, numEntriesScannedPostFilter,
         _numTotalDocs);
+  }
+
+  @Override
+  public String toExplainString() {
+    StringBuilder stringBuilder = new StringBuilder(EXPLAIN_NAME).append("(aggregations:");
+    if (_aggregationFunctions.length > 0) {
+      stringBuilder.append(_aggregationFunctions[0].toExplainString());
+      for (int i = 1; i < _aggregationFunctions.length; i++) {
+        stringBuilder.append(", ").append(_aggregationFunctions[i].toExplainString());
+      }
+    }
+
+    return stringBuilder.append(')').toString();
   }
 }

@@ -46,7 +46,14 @@
     </file>
     <!-- Start Include Pinot Plugins-->
     <!-- Start Include Pinot Stream Ingestion Plugins-->
-    <!-- Only Include Specified Kafka Version Plugin-->
+    <file>
+      <source>
+        ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-0.9/target/pinot-kafka-0.9-${project.version}-shaded.jar
+      </source>
+      <destName>
+        plugins/pinot-stream-ingestion/pinot-kafka-0.9/pinot-kafka-0.9-${project.version}-shaded.jar
+      </destName>
+    </file>
     <file>
       <source>
         ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-${kafka.version}/target/pinot-kafka-${kafka.version}-${project.version}-shaded.jar
@@ -62,12 +69,10 @@
       <destName>plugins/pinot-stream-ingestion/pinot-kinesis/pinot-kinesis-${project.version}-shaded.jar</destName>
     </file>
 
-    <!-- TODO: fix the runtime issue for Apache Pulsar plug-in and add this back. (https://github.com/apache/pinot/issues/7270)
     <file>
       <source>${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-pulsar/target/pinot-pulsar-${project.version}-shaded.jar</source>
       <destName>plugins/pinot-stream-ingestion/pinot-pulsar/pinot-pulsar-${project.version}-shaded.jar</destName>
     </file>
-    -->
 
     <!-- End Include Pinot Stream Ingestion Plugins-->
     <!-- Start Include Pinot Batch Ingestion Plugins-->
@@ -84,15 +89,23 @@
         ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/target/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
       </destName>
     </file>
     <file>
       <source>
-        ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark/target/pinot-batch-ingestion-spark-${project.version}-shaded.jar
+        ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark-2.4/target/pinot-batch-ingestion-spark-2.4-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark/pinot-batch-ingestion-spark-${project.version}-shaded.jar
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-spark-2.4/pinot-batch-ingestion-spark-2.4-${project.version}-shaded.jar
+      </destName>
+    </file>
+    <file>
+      <source>
+        ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark-3.2/target/pinot-batch-ingestion-spark-3.2-${project.version}-shaded.jar
+      </source>
+      <destName>
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-spark-3.2/pinot-batch-ingestion-spark-3.2-${project.version}-shaded.jar
       </destName>
     </file>
     <!-- End Include Pinot Batch Ingestion Plugins-->

@@ -21,23 +21,34 @@ package org.apache.pinot.plugin.stream.pulsar;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.commons.io.output.ByteArrayOutputStream;
 import org.apache.pinot.spi.stream.MessageBatch;
 import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.impl.BatchMessageIdImpl;
 import org.apache.pulsar.client.impl.MessageIdImpl;
 import org.apache.pulsar.client.internal.DefaultImplementation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
  * A {@link MessageBatch} for collecting messages from pulsar topic
+ *
+ * When 'enableKeyValueStitch' flag is enabled, existing {@link org.apache.pinot.spi.stream.StreamMessageDecoder}
+ * plugins will not work. A custom decoder will be needed to unpack key and value byte arrays and decode
+ * them independently.
  */
 public class PulsarMessageBatch implements MessageBatch<byte[]> {
-
+  private static final Logger LOGGER = LoggerFactory.getLogger(PulsarMessageBatch.class);
   private List<Message<byte[]>> _messageList = new ArrayList<>();
+  private static ByteBuffer _lengthBuf = ByteBuffer.allocate(4);
+  private final boolean _enableKeyValueStitch;
 
-  public PulsarMessageBatch(Iterable<Message<byte[]>> iterable) {
+  public PulsarMessageBatch(Iterable<Message<byte[]>> iterable, boolean enableKeyValueStitch) {
     iterable.forEach(_messageList::add);
+    _enableKeyValueStitch = enableKeyValueStitch;
   }
 
   @Override
@@ -47,7 +58,11 @@ public class PulsarMessageBatch implements MessageBatch<byte[]> {
 
   @Override
   public byte[] getMessageAtIndex(int index) {
-    return _messageList.get(index).getData();
+    Message<byte[]> msg = _messageList.get(index);
+    if (_enableKeyValueStitch) {
+      return stitchKeyValue(msg.getKeyBytes(), msg.getData());
+    }
+    return msg.getData();
   }
 
   @Override
@@ -57,6 +72,10 @@ public class PulsarMessageBatch implements MessageBatch<byte[]> {
 
   @Override
   public int getMessageLengthAtIndex(int index) {
+    if (_enableKeyValueStitch) {
+      Message<byte[]> msg = _messageList.get(index);
+      return 8 + msg.getKeyBytes().length + msg.getData().length;
+    }
     return _messageList.get(index).getData().length;
   }
 
@@ -73,16 +92,58 @@ public class PulsarMessageBatch implements MessageBatch<byte[]> {
    * and returns the first record in the new ledger.
    */
   @Override
-  public StreamPartitionMsgOffset getNextStreamParitionMsgOffsetAtIndex(int index) {
+  public StreamPartitionMsgOffset getNextStreamPartitionMsgOffsetAtIndex(int index) {
     MessageIdImpl currentMessageId = MessageIdImpl.convertToMessageIdImpl(_messageList.get(index).getMessageId());
-    MessageId nextMessageId = DefaultImplementation
-        .newMessageId(currentMessageId.getLedgerId(), currentMessageId.getEntryId() + 1,
-            currentMessageId.getPartitionIndex());
+    MessageId nextMessageId;
+
+    long currentLedgerId = currentMessageId.getLedgerId();
+    long currentEntryId = currentMessageId.getEntryId();
+    int currentPartitionIndex = currentMessageId.getPartitionIndex();
+
+    if (currentMessageId instanceof BatchMessageIdImpl) {
+      int currentBatchIndex = ((BatchMessageIdImpl) currentMessageId).getBatchIndex();
+      int currentBatchSize = ((BatchMessageIdImpl) currentMessageId).getBatchSize();
+
+      if (currentBatchIndex < currentBatchSize - 1) {
+        nextMessageId =
+            new BatchMessageIdImpl(currentLedgerId, currentEntryId, currentPartitionIndex, currentBatchIndex + 1,
+                currentBatchSize, ((BatchMessageIdImpl) currentMessageId).getAcker());
+      } else {
+        nextMessageId =
+            new BatchMessageIdImpl(currentLedgerId, currentEntryId + 1, currentPartitionIndex, 0, currentBatchSize,
+                ((BatchMessageIdImpl) currentMessageId).getAcker());
+      }
+    } else {
+      nextMessageId = DefaultImplementation.newMessageId(currentLedgerId, currentEntryId + 1, currentPartitionIndex);
+    }
     return new MessageIdStreamOffset(nextMessageId);
   }
 
   @Override
   public long getNextStreamMessageOffsetAtIndex(int index) {
     throw new UnsupportedOperationException("Pulsar does not support long stream offsets");
+  }
+
+  /**
+   * Stitch key and value bytes together using a simple format:
+   * 4 bytes for key length + key bytes + 4 bytes for value length + value bytes
+   */
+  private byte[] stitchKeyValue(byte[] keyBytes, byte[] valueBytes) {
+    int keyLen = keyBytes.length;
+    int valueLen = valueBytes.length;
+    int totalByteArrayLength = 8 + keyLen + valueLen;
+    try {
+      ByteArrayOutputStream bos = new ByteArrayOutputStream(totalByteArrayLength);
+      _lengthBuf.clear();
+      bos.write(_lengthBuf.putInt(keyLen).array());
+      bos.write(keyBytes);
+      _lengthBuf.clear();
+      bos.write(_lengthBuf.putInt(valueLen).array());
+      bos.write(valueBytes);
+      return bos.toByteArray();
+    } catch (Exception e) {
+      LOGGER.error("Unable to stitch key and value bytes together", e);
+    }
+    return null;
   }
 }

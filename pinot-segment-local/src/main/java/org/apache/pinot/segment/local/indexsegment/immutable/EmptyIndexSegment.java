@@ -26,8 +26,8 @@ import org.apache.pinot.segment.local.segment.index.datasource.EmptyDataSource;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.index.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
 import org.apache.pinot.segment.spi.index.reader.InvertedIndexReader;
@@ -95,6 +95,11 @@ public class EmptyIndexSegment implements ImmutableSegment {
   }
 
   @Override
+  public Object getValue(int docId, String column) {
+    throw new UnsupportedOperationException("Cannot read value from empty segment");
+  }
+
+  @Override
   public Dictionary getDictionary(String column) {
     return null;
   }
@@ -112,5 +117,11 @@ public class EmptyIndexSegment implements ImmutableSegment {
   @Override
   public long getSegmentSizeBytes() {
     return 0;
+  }
+
+  @Nullable
+  @Override
+  public String getTier() {
+    return null;
   }
 }

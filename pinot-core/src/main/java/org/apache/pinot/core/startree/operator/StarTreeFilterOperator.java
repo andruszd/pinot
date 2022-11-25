@@ -21,18 +21,18 @@ package org.apache.pinot.core.startree.operator;
 import it.unimi.dsi.fastutil.ints.IntIterator;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.ints.IntSet;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.blocks.EmptyFilterBlock;
 import org.apache.pinot.core.operator.blocks.FilterBlock;
 import org.apache.pinot.core.operator.filter.BaseFilterOperator;
@@ -40,6 +40,7 @@ import org.apache.pinot.core.operator.filter.BitmapBasedFilterOperator;
 import org.apache.pinot.core.operator.filter.EmptyFilterOperator;
 import org.apache.pinot.core.operator.filter.FilterOperatorUtils;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.startree.CompositePredicateEvaluator;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.index.startree.StarTree;
@@ -84,21 +85,7 @@ import org.roaringbitmap.buffer.MutableRoaringBitmap;
  * </ul>
  */
 public class StarTreeFilterOperator extends BaseFilterOperator {
-
-  /**
-   * Helper class to wrap the information needed when traversing the star tree.
-   */
-  private static class SearchEntry {
-    final StarTreeNode _starTreeNode;
-    final Set<String> _remainingPredicateColumns;
-    final Set<String> _remainingGroupByColumns;
-
-    SearchEntry(StarTreeNode starTreeNode, Set<String> remainingPredicateColumns, Set<String> remainingGroupByColumns) {
-      _starTreeNode = starTreeNode;
-      _remainingPredicateColumns = remainingPredicateColumns;
-      _remainingGroupByColumns = remainingGroupByColumns;
-    }
-  }
+  private static final String EXPLAIN_NAME = "FILTER_STARTREE_INDEX";
 
   /**
    * Helper class to wrap the result from traversing the star tree.
@@ -113,36 +100,23 @@ public class StarTreeFilterOperator extends BaseFilterOperator {
     }
   }
 
-  private static final String OPERATOR_NAME = "StarTreeFilterOperator";
   // If (number of matching dictionary ids * threshold) > (number of child nodes), use scan to traverse nodes instead of
   // binary search on each dictionary id
   private static final int USE_SCAN_TO_TRAVERSE_NODES_THRESHOLD = 10;
 
-  // Star-tree
+  private final QueryContext _queryContext;
   private final StarTreeV2 _starTreeV2;
-  // Map from column to predicate evaluators
   private final Map<String, List<CompositePredicateEvaluator>> _predicateEvaluatorsMap;
-  // Set of group-by columns
   private final Set<String> _groupByColumns;
-
-  private final Map<String, String> _debugOptions;
 
   boolean _resultEmpty = false;
 
-  public StarTreeFilterOperator(StarTreeV2 starTreeV2,
-      Map<String, List<CompositePredicateEvaluator>> predicateEvaluatorsMap, Set<String> groupByColumns,
-      @Nullable Map<String, String> debugOptions) {
+  public StarTreeFilterOperator(QueryContext queryContext, StarTreeV2 starTreeV2,
+      Map<String, List<CompositePredicateEvaluator>> predicateEvaluatorsMap, @Nullable Set<String> groupByColumns) {
+    _queryContext = queryContext;
     _starTreeV2 = starTreeV2;
     _predicateEvaluatorsMap = predicateEvaluatorsMap;
-    _debugOptions = debugOptions;
-
-    if (groupByColumns != null) {
-      _groupByColumns = new HashSet<>(groupByColumns);
-      // Remove columns with predicates from group-by columns because we won't use star node for that column
-      _groupByColumns.removeAll(_predicateEvaluatorsMap.keySet());
-    } else {
-      _groupByColumns = Collections.emptySet();
-    }
+    _groupByColumns = groupByColumns != null ? groupByColumns : Collections.emptySet();
   }
 
   @Override
@@ -159,8 +133,13 @@ public class StarTreeFilterOperator extends BaseFilterOperator {
   }
 
   @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
+  public String toExplainString() {
+    return EXPLAIN_NAME;
+  }
+
+  @Override
+  public List<Operator> getChildOperators() {
+    return Collections.emptyList();
   }
 
   /**
@@ -195,22 +174,22 @@ public class StarTreeFilterOperator extends BaseFilterOperator {
         int numPredicateEvaluators = predicateEvaluators.size();
         if (numPredicateEvaluators == 1) {
           // Single predicate evaluator
-          childFilterOperators
-              .add(FilterOperatorUtils.getLeafFilterOperator(predicateEvaluators.get(0), dataSource, numDocs));
+          childFilterOperators.add(
+              FilterOperatorUtils.getLeafFilterOperator(predicateEvaluators.get(0), dataSource, numDocs));
         } else {
           // Predicate evaluators conjoined with OR
           List<BaseFilterOperator> orChildFilterOperators = new ArrayList<>(numPredicateEvaluators);
           for (PredicateEvaluator childPredicateEvaluator : predicateEvaluators) {
-            orChildFilterOperators
-                .add(FilterOperatorUtils.getLeafFilterOperator(childPredicateEvaluator, dataSource, numDocs));
+            orChildFilterOperators.add(
+                FilterOperatorUtils.getLeafFilterOperator(childPredicateEvaluator, dataSource, numDocs));
           }
-          childFilterOperators
-              .add(FilterOperatorUtils.getOrFilterOperator(orChildFilterOperators, numDocs, _debugOptions));
+          childFilterOperators.add(
+              FilterOperatorUtils.getOrFilterOperator(_queryContext, orChildFilterOperators, numDocs));
         }
       }
     }
 
-    return FilterOperatorUtils.getAndFilterOperator(childFilterOperators, numDocs, _debugOptions);
+    return FilterOperatorUtils.getAndFilterOperator(_queryContext, childFilterOperators, numDocs);
   }
 
   /**
@@ -221,108 +200,144 @@ public class StarTreeFilterOperator extends BaseFilterOperator {
   @Nullable
   private StarTreeResult traverseStarTree() {
     MutableRoaringBitmap matchingDocIds = new MutableRoaringBitmap();
-    Set<String> remainingPredicateColumns = new HashSet<>();
-    Map<String, IntSet> matchingDictIdsMap = new HashMap<>();
+    Set<String> globalRemainingPredicateColumns = Collections.emptySet();
+    boolean globalRemainingPredicateColumnsSet = false;
 
     StarTree starTree = _starTreeV2.getStarTree();
     List<String> dimensionNames = starTree.getDimensionNames();
     StarTreeNode starTreeRootNode = starTree.getRoot();
 
     // Use BFS to traverse the star tree
-    Queue<SearchEntry> queue = new LinkedList<>();
-    queue.add(new SearchEntry(starTreeRootNode, _predicateEvaluatorsMap.keySet(), _groupByColumns));
-    SearchEntry searchEntry;
-    while ((searchEntry = queue.poll()) != null) {
-      StarTreeNode starTreeNode = searchEntry._starTreeNode;
+    Queue<StarTreeNode> queue = new ArrayDeque<>();
+    queue.add(starTreeRootNode);
+    int currentDimensionId = -1;
+    Set<String> remainingPredicateColumns = new HashSet<>(_predicateEvaluatorsMap.keySet());
+    Set<String> remainingGroupByColumns = new HashSet<>(_groupByColumns);
+    IntSet matchingDictIds = null;
+    StarTreeNode starTreeNode;
+    while ((starTreeNode = queue.poll()) != null) {
+      int dimensionId = starTreeNode.getDimensionId();
+      if (dimensionId > currentDimensionId) {
+        // Previous level finished
+        String dimension = dimensionNames.get(dimensionId);
+        remainingPredicateColumns.remove(dimension);
+        remainingGroupByColumns.remove(dimension);
+        matchingDictIds = null;
+        currentDimensionId = dimensionId;
+      }
 
       // If all predicate columns and group-by columns are matched, we can use aggregated document
-      if (searchEntry._remainingPredicateColumns.isEmpty() && searchEntry._remainingGroupByColumns.isEmpty()) {
+      if (remainingPredicateColumns.isEmpty() && remainingGroupByColumns.isEmpty()) {
         matchingDocIds.add(starTreeNode.getAggregatedDocId());
-      } else {
-        // For leaf node, because we haven't exhausted all predicate columns and group-by columns, we cannot use
-        // the aggregated document. Add the range of documents for this node to the bitmap, and keep track of the
-        // remaining predicate columns for this node
-        if (starTreeNode.isLeaf()) {
-          matchingDocIds.add((long) starTreeNode.getStartDocId(), starTreeNode.getEndDocId());
-          remainingPredicateColumns.addAll(searchEntry._remainingPredicateColumns);
-        } else {
-          // For non-leaf node, proceed to next level
-          String nextDimension = dimensionNames.get(starTreeNode.getChildDimensionId());
+        continue;
+      }
 
-          // If we have predicates on next level, add matching nodes to the queue
-          if (searchEntry._remainingPredicateColumns.contains(nextDimension)) {
-            Set<String> newRemainingPredicateColumns = new HashSet<>(searchEntry._remainingPredicateColumns);
-            newRemainingPredicateColumns.remove(nextDimension);
+      // For leaf node, because we haven't exhausted all predicate columns and group-by columns, we cannot use
+      // the aggregated document. Add the range of documents for this node to the bitmap, and keep track of the
+      // remaining predicate columns for this node
+      if (starTreeNode.isLeaf()) {
+        matchingDocIds.add((long) starTreeNode.getStartDocId(), starTreeNode.getEndDocId());
+        // Only set the global remaining predicate columns once because we traverse the tree with BFS, so the first leaf
+        // node always have all the remaining predicate columns
+        if (!globalRemainingPredicateColumnsSet) {
+          if (!remainingPredicateColumns.isEmpty()) {
+            globalRemainingPredicateColumns = new HashSet<>(remainingPredicateColumns);
+          }
+          globalRemainingPredicateColumnsSet = true;
+        }
+        continue;
+      }
 
-            IntSet matchingDictIds = matchingDictIdsMap.get(nextDimension);
-            if (matchingDictIds == null) {
-              matchingDictIds = getMatchingDictIds(_predicateEvaluatorsMap.get(nextDimension));
+      // For non-leaf node, proceed to next level
+      String childDimension = dimensionNames.get(dimensionId + 1);
 
-              // If no matching dictionary id found, directly return null
-              if (matchingDictIds.isEmpty()) {
-                return null;
-              }
+      // Only read star-node when the dimension is not in the global remaining predicate columns or group-by columns
+      // because we cannot use star-node in such cases
+      StarTreeNode starNode = null;
+      if (!globalRemainingPredicateColumns.contains(childDimension) && !remainingGroupByColumns.contains(
+          childDimension)) {
+        starNode = starTreeNode.getChildForDimensionValue(StarTreeNode.ALL);
+      }
 
-              matchingDictIdsMap.put(nextDimension, matchingDictIds);
-            }
+      if (remainingPredicateColumns.contains(childDimension)) {
+        // Have predicates on the next level, add matching nodes to the queue
 
-            int numMatchingDictIds = matchingDictIds.size();
-            int numChildren = starTreeNode.getNumChildren();
+        // Calculate the matching dictionary ids for the child dimension
+        if (matchingDictIds == null) {
+          matchingDictIds = getMatchingDictIds(_predicateEvaluatorsMap.get(childDimension));
 
-            // If number of matching dictionary ids is large, use scan instead of binary search
-            if (numMatchingDictIds * USE_SCAN_TO_TRAVERSE_NODES_THRESHOLD > numChildren) {
-              Iterator<? extends StarTreeNode> childrenIterator = starTreeNode.getChildrenIterator();
-              while (childrenIterator.hasNext()) {
-                StarTreeNode childNode = childrenIterator.next();
-                if (matchingDictIds.contains(childNode.getDimensionValue())) {
-                  queue.add(
-                      new SearchEntry(childNode, newRemainingPredicateColumns, searchEntry._remainingGroupByColumns));
-                }
-              }
-            } else {
-              IntIterator iterator = matchingDictIds.iterator();
-              while (iterator.hasNext()) {
-                int matchingDictId = iterator.nextInt();
-                StarTreeNode childNode = starTreeNode.getChildForDimensionValue(matchingDictId);
+          // If no matching dictionary id found, directly return null
+          if (matchingDictIds.isEmpty()) {
+            return null;
+          }
+        }
 
-                // Child node might be null because the matching dictionary id might not exist under this branch
-                if (childNode != null) {
-                  queue.add(
-                      new SearchEntry(childNode, newRemainingPredicateColumns, searchEntry._remainingGroupByColumns));
-                }
-              }
-            }
-          } else {
-            // If we don't have predicate or group-by on next level, use star node if exists
-            Set<String> newRemainingGroupByColumns;
-            if (!searchEntry._remainingGroupByColumns.contains(nextDimension)) {
-              StarTreeNode starNode = starTreeNode.getChildForDimensionValue(StarTreeNode.ALL);
-              if (starNode != null) {
-                queue.add(new SearchEntry(starNode, searchEntry._remainingPredicateColumns,
-                    searchEntry._remainingGroupByColumns));
-                continue;
-              }
-              newRemainingGroupByColumns = searchEntry._remainingGroupByColumns;
-            } else {
-              newRemainingGroupByColumns = new HashSet<>(searchEntry._remainingGroupByColumns);
-              newRemainingGroupByColumns.remove(nextDimension);
-            }
+        int numMatchingDictIds = matchingDictIds.size();
+        int numChildren = starTreeNode.getNumChildren();
 
-            // Add all non-star nodes to the queue if cannot use star node
-            Iterator<? extends StarTreeNode> childrenIterator = starTreeNode.getChildrenIterator();
+        // If number of matching dictionary ids is large, use scan instead of binary search
+        if (numMatchingDictIds * USE_SCAN_TO_TRAVERSE_NODES_THRESHOLD > numChildren) {
+          Iterator<? extends StarTreeNode> childrenIterator = starTreeNode.getChildrenIterator();
+
+          // When the star-node exists, and the number of matching dictionary ids is more than or equal to the
+          // number of non-star child nodes, check if all the child nodes match the predicate, and use the
+          // star-node if so
+          if (starNode != null && numMatchingDictIds >= numChildren - 1) {
+            List<StarTreeNode> matchingChildNodes = new ArrayList<>();
             while (childrenIterator.hasNext()) {
               StarTreeNode childNode = childrenIterator.next();
-              if (childNode.getDimensionValue() != StarTreeNode.ALL) {
-                queue.add(
-                    new SearchEntry(childNode, searchEntry._remainingPredicateColumns, newRemainingGroupByColumns));
+              if (matchingDictIds.contains(childNode.getDimensionValue())) {
+                matchingChildNodes.add(childNode);
               }
+            }
+            if (matchingChildNodes.size() == numChildren - 1) {
+              // All the child nodes (except for the star-node) match the predicate, use the star-node
+              queue.add(starNode);
+            } else {
+              // Some child nodes do not match the predicate, use the matching child nodes
+              queue.addAll(matchingChildNodes);
+            }
+          } else {
+            // Cannot use the star-node, use the matching child nodes
+            while (childrenIterator.hasNext()) {
+              StarTreeNode childNode = childrenIterator.next();
+              if (matchingDictIds.contains(childNode.getDimensionValue())) {
+                queue.add(childNode);
+              }
+            }
+          }
+        } else {
+          IntIterator iterator = matchingDictIds.iterator();
+          while (iterator.hasNext()) {
+            int matchingDictId = iterator.nextInt();
+            StarTreeNode childNode = starTreeNode.getChildForDimensionValue(matchingDictId);
+
+            // Child node might be null because the matching dictionary id might not exist under this branch
+            if (childNode != null) {
+              queue.add(childNode);
+            }
+          }
+        }
+      } else {
+        // No predicate on the next level
+
+        if (starNode != null) {
+          // Star-node exists, use it
+          queue.add(starNode);
+        } else {
+          // Star-node does not exist or cannot be used, add all non-star nodes to the queue
+          Iterator<? extends StarTreeNode> childrenIterator = starTreeNode.getChildrenIterator();
+          while (childrenIterator.hasNext()) {
+            StarTreeNode childNode = childrenIterator.next();
+            if (childNode.getDimensionValue() != StarTreeNode.ALL) {
+              queue.add(childNode);
             }
           }
         }
       }
     }
 
-    return new StarTreeResult(matchingDocIds, remainingPredicateColumns);
+    return new StarTreeResult(matchingDocIds, globalRemainingPredicateColumns);
   }
 
   /**

@@ -19,6 +19,7 @@
 package org.apache.pinot.controller.recommender.rules.impl;
 
 import com.google.common.util.concurrent.AtomicDouble;
+import java.util.List;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.FilterContext;
 import org.apache.pinot.common.request.context.predicate.Predicate;
@@ -70,6 +71,7 @@ public class RangeIndexRule extends AbstractRule {
       // As currently, only numeric columns are selected in range index creation, we will skip non numeric columns
       if (((weights[i] / totalWeight.get()) > _params._thresholdMinPercentRangeIndex) && !_output.getIndexConfig()
           .getSortedColumn().equals(colName) && !_output.getIndexConfig().getInvertedIndexColumns().contains(colName)
+          && _input.getCardinality(colName) > _params._thresholdMinCardinalityRangeIndex
           && _input.getFieldType(colName).isNumeric()) {
         _output.getIndexConfig().getRangeIndexColumns().add(colName);
       }
@@ -90,14 +92,16 @@ public class RangeIndexRule extends AbstractRule {
    * @return FixedLenBitset for range predicates in this query
    */
   private FixedLenBitset parsePredicateList(FilterContext filterContext) {
-    FilterContext.Type type = filterContext.getType();
     FixedLenBitset ret = mutableEmptySet();
-    if (type == FilterContext.Type.AND || type == FilterContext.Type.OR) {
-      for (int i = 0; i < filterContext.getChildren().size(); i++) {
-        FixedLenBitset childResult = parsePredicateList(filterContext.getChildren().get(i));
+    List<FilterContext> children = filterContext.getChildren();
+    if (children != null) {
+      // AND, OR, NOT
+      for (FilterContext child : children) {
+        FixedLenBitset childResult = parsePredicateList(child);
         ret.union(childResult);
       }
     } else {
+      // PREDICATE
       ExpressionContext lhs = filterContext.getPredicate().getLhs();
       String colName = lhs.toString();
       if (lhs.getType() == ExpressionContext.Type.FUNCTION) {

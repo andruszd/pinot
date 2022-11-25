@@ -30,25 +30,27 @@ import java.util.Set;
 import java.util.UUID;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.local.io.writer.impl.MmapMemoryManager;
 import org.apache.pinot.segment.local.realtime.impl.dictionary.MutableDictionaryFactory;
 import org.apache.pinot.segment.local.realtime.impl.forward.FixedByteMVMutableForwardIndex;
 import org.apache.pinot.segment.local.realtime.impl.forward.FixedByteSVMutableForwardIndex;
 import org.apache.pinot.segment.local.segment.index.column.IntermediateIndexContainer;
 import org.apache.pinot.segment.local.segment.index.column.NumValuesInfo;
+import org.apache.pinot.segment.local.segment.readers.PinotSegmentColumnReader;
+import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
 import org.apache.pinot.segment.spi.MutableSegment;
 import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.index.ThreadSafeMutableRoaringBitmap;
-import org.apache.pinot.segment.spi.index.reader.MutableDictionary;
-import org.apache.pinot.segment.spi.index.reader.MutableForwardIndex;
+import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.segment.spi.index.mutable.MutableDictionary;
+import org.apache.pinot.segment.spi.index.mutable.MutableForwardIndex;
+import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
 import org.apache.pinot.segment.spi.partition.PartitionFunctionFactory;
-import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -58,6 +60,7 @@ import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.stream.RowMetadata;
 import org.apache.pinot.spi.utils.ByteArray;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,8 +83,7 @@ public class IntermediateSegment implements MutableSegment {
   private final Schema _schema;
   private final TableConfig _tableConfig;
   private final String _segmentName;
-  private final PartitionFunction _partitionFunction;
-  private final String _partitionColumn;
+  private final SegmentMetadata _segmentMetadata;
   private final Map<String, IntermediateIndexContainer> _indexContainerMap = new HashMap<>();
   private final PinotDataBufferMemoryManager _memoryManager;
   private final File _mmapDir;
@@ -94,6 +96,14 @@ public class IntermediateSegment implements MutableSegment {
     _schema = segmentGeneratorConfig.getSchema();
     _tableConfig = segmentGeneratorConfig.getTableConfig();
     _segmentName = _segmentGeneratorConfig.getTableName() + System.currentTimeMillis();
+    _segmentMetadata =
+        new SegmentMetadataImpl(TableNameBuilder.extractRawTableName(_tableConfig.getTableName()), _segmentName,
+            _schema, System.currentTimeMillis()) {
+          @Override
+          public int getTotalDocs() {
+            return _numDocsIndexed;
+          }
+        };
 
     Collection<FieldSpec> allFieldSpecs = _schema.getAllFieldSpecs();
     List<FieldSpec> physicalFieldSpecs = new ArrayList<>(allFieldSpecs.size());
@@ -103,22 +113,10 @@ public class IntermediateSegment implements MutableSegment {
       }
     }
 
-    SegmentPartitionConfig segmentPartitionConfig = segmentGeneratorConfig.getSegmentPartitionConfig();
-    if (segmentPartitionConfig != null) {
-      Map<String, ColumnPartitionConfig> segmentPartitionConfigColumnPartitionMap =
-          segmentPartitionConfig.getColumnPartitionMap();
-      _partitionColumn = segmentPartitionConfigColumnPartitionMap.keySet().iterator().next();
-      _partitionFunction = PartitionFunctionFactory
-          .getPartitionFunction(segmentPartitionConfig.getFunctionName(_partitionColumn),
-              segmentPartitionConfig.getNumPartitions(_partitionColumn));
-    } else {
-      _partitionColumn = null;
-      _partitionFunction = null;
-    }
     String outputDir = segmentGeneratorConfig.getOutDir();
-    _mmapDir = new File(outputDir, _segmentName + "_mmap_" + UUID.randomUUID().toString());
+    _mmapDir = new File(outputDir, _segmentName + "_mmap_" + UUID.randomUUID());
     _mmapDir.mkdir();
-    LOGGER.info("Mmap file dir: " + _mmapDir.toString());
+    LOGGER.info("Mmap file dir: " + _mmapDir);
     _memoryManager = new MmapMemoryManager(_mmapDir.toString(), _segmentName, null);
 
     // Initialize for each column
@@ -126,10 +124,13 @@ public class IntermediateSegment implements MutableSegment {
       String column = fieldSpec.getName();
 
       // Partition info
+      SegmentPartitionConfig segmentPartitionConfig = segmentGeneratorConfig.getSegmentPartitionConfig();
       PartitionFunction partitionFunction = null;
       Set<Integer> partitions = null;
-      if (column.equals(_partitionColumn)) {
-        partitionFunction = _partitionFunction;
+      if (segmentPartitionConfig != null && segmentPartitionConfig.getColumnPartitionMap().containsKey(column)) {
+        partitionFunction =
+            PartitionFunctionFactory.getPartitionFunction(segmentPartitionConfig.getFunctionName(column),
+                segmentPartitionConfig.getNumPartitions(column), segmentPartitionConfig.getFunctionConfig(column));
         partitions = new HashSet<>();
         partitions.add(segmentGeneratorConfig.getSequenceId());
       }
@@ -165,7 +166,7 @@ public class IntermediateSegment implements MutableSegment {
         // TODO: Start with a smaller capacity on FixedByteMVForwardIndexReaderWriter and let it expand
         forwardIndex =
             new FixedByteMVMutableForwardIndex(MAX_MULTI_VALUES_PER_ROW, DEFAULT_AVG_MULTI_VALUE_COUNT, _capacity,
-                Integer.BYTES, _memoryManager, allocationContext);
+                Integer.BYTES, _memoryManager, allocationContext, true, DataType.INT);
       }
 
       _indexContainerMap.put(column,
@@ -195,7 +196,7 @@ public class IntermediateSegment implements MutableSegment {
 
   @Override
   public SegmentMetadata getSegmentMetadata() {
-    return null;
+    return _segmentMetadata;
   }
 
   @Override
@@ -226,14 +227,23 @@ public class IntermediateSegment implements MutableSegment {
 
   @Override
   public GenericRow getRecord(int docId, GenericRow reuse) {
-    for (Map.Entry<String, IntermediateIndexContainer> entry : _indexContainerMap.entrySet()) {
-      String column = entry.getKey();
-      IntermediateIndexContainer indexContainer = entry.getValue();
-      Object value = getValue(docId, indexContainer.getForwardIndex(), indexContainer.getDictionary(),
-          indexContainer.getNumValuesInfo().getMaxNumValuesPerMVEntry());
-      reuse.putValue(column, value);
+    try (PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader()) {
+      recordReader.init(this);
+      recordReader.getRecord(docId, reuse);
+      return reuse;
+    } catch (Exception e) {
+      throw new RuntimeException("Caught exception while reading record for docId: " + docId, e);
     }
-    return reuse;
+  }
+
+  @Override
+  public Object getValue(int docId, String column) {
+    try (PinotSegmentColumnReader columnReader = new PinotSegmentColumnReader(this, column)) {
+      return columnReader.getValue(docId);
+    } catch (Exception e) {
+      throw new RuntimeException(
+          String.format("Caught exception while reading value for docId: %d, column: %s", docId, column), e);
+    }
   }
 
   @Override
@@ -356,25 +366,5 @@ public class IntermediateSegment implements MutableSegment {
 
   private String buildAllocationContext(String segmentName, String columnName, String indexType) {
     return segmentName + ":" + columnName + indexType;
-  }
-
-  /**
-   * Helper method to read the value for the given document id.
-   */
-  private static Object getValue(int docId, MutableForwardIndex forwardIndex, MutableDictionary dictionary,
-      int maxNumMultiValues) {
-    // Dictionary based
-    if (forwardIndex.isSingleValue()) {
-      int dictId = forwardIndex.getDictId(docId);
-      return dictionary.get(dictId);
-    } else {
-      int[] dictIds = new int[maxNumMultiValues];
-      int numValues = forwardIndex.getDictIdMV(docId, dictIds);
-      Object[] value = new Object[numValues];
-      for (int i = 0; i < numValues; i++) {
-        value[i] = dictionary.get(dictIds[i]);
-      }
-      return value;
-    }
   }
 }

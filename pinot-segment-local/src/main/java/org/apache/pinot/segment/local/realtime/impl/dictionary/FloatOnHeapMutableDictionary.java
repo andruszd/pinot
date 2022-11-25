@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.realtime.impl.dictionary;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import it.unimi.dsi.fastutil.ints.IntSets;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.common.request.context.predicate.RangePredicate;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
@@ -167,6 +168,11 @@ public class FloatOnHeapMutableDictionary extends BaseOnHeapMutableDictionary {
   }
 
   @Override
+  public int indexOf(float floatValue) {
+    return getDictId(floatValue);
+  }
+
+  @Override
   public int getIntValue(int dictId) {
     return (int) getFloatValue(dictId);
   }
@@ -184,6 +190,11 @@ public class FloatOnHeapMutableDictionary extends BaseOnHeapMutableDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return getFloatValue(dictId);
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(getFloatValue(dictId));
   }
 
   @Override

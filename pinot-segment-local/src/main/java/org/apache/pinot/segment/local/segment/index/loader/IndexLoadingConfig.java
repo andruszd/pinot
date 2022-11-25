@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.local.segment.index.loader;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -27,20 +28,26 @@ import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.segment.local.loader.LocalSegmentDirectoryLoader;
 import org.apache.pinot.segment.local.segment.index.column.PhysicalColumnIndexContainer;
 import org.apache.pinot.segment.local.segment.index.loader.columnminmaxvalue.ColumnMinMaxValueGeneratorMode;
+import org.apache.pinot.segment.local.segment.store.TextIndexUtils;
+import org.apache.pinot.segment.spi.compression.ChunkCompressionType;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
 import org.apache.pinot.segment.spi.index.creator.H3IndexConfig;
+import org.apache.pinot.segment.spi.loader.SegmentDirectoryLoaderRegistry;
 import org.apache.pinot.spi.config.instance.InstanceDataManagerConfig;
 import org.apache.pinot.spi.config.table.BloomFilterConfig;
+import org.apache.pinot.spi.config.table.FSTType;
 import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.IndexingConfig;
+import org.apache.pinot.spi.config.table.JsonIndexConfig;
 import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.ReadMode;
+import org.apache.pinot.spi.utils.TimestampIndexUtils;
 
 
 /**
@@ -48,9 +55,8 @@ import org.apache.pinot.spi.utils.ReadMode;
  */
 public class IndexLoadingConfig {
   private static final int DEFAULT_REALTIME_AVG_MULTI_VALUE_COUNT = 2;
-  public static final String DEFAULT_TIER_BACKEND = "local";
+  public static final String READ_MODE_KEY = "readMode";
 
-  private String _tableNameWithType;
   private ReadMode _readMode = ReadMode.DEFAULT_MODE;
   private List<String> _sortedColumns = Collections.emptyList();
   private Set<String> _invertedIndexColumns = new HashSet<>();
@@ -58,16 +64,19 @@ public class IndexLoadingConfig {
   private int _rangeIndexVersion = IndexingConfig.DEFAULT_RANGE_INDEX_VERSION;
   private Set<String> _textIndexColumns = new HashSet<>();
   private Set<String> _fstIndexColumns = new HashSet<>();
-  private Set<String> _jsonIndexColumns = new HashSet<>();
+  private FSTType _fstIndexType = FSTType.LUCENE;
+  private Map<String, JsonIndexConfig> _jsonIndexConfigs = new HashMap<>();
   private Map<String, H3IndexConfig> _h3IndexConfigs = new HashMap<>();
   private Set<String> _noDictionaryColumns = new HashSet<>(); // TODO: replace this by _noDictionaryConfig.
-  private Map<String, String> _noDictionaryConfig = new HashMap<>();
-  private Set<String> _varLengthDictionaryColumns = new HashSet<>();
+  private final Map<String, String> _noDictionaryConfig = new HashMap<>();
+  private final Set<String> _varLengthDictionaryColumns = new HashSet<>();
   private Set<String> _onHeapDictionaryColumns = new HashSet<>();
+  private Set<String> _forwardIndexDisabledColumns = new HashSet<>();
   private Map<String, BloomFilterConfig> _bloomFilterConfigs = new HashMap<>();
   private boolean _enableDynamicStarTreeCreation;
   private List<StarTreeIndexConfig> _starTreeIndexConfigs;
   private boolean _enableDefaultStarTree;
+  private Map<String, ChunkCompressionType> _compressionConfigs = new HashMap<>();
 
   private SegmentVersion _segmentVersion;
   private ColumnMinMaxValueGeneratorMode _columnMinMaxValueGeneratorMode = ColumnMinMaxValueGeneratorMode.DEFAULT_MODE;
@@ -82,19 +91,39 @@ public class IndexLoadingConfig {
   private Map<String, Map<String, String>> _columnProperties = new HashMap<>();
 
   private TableConfig _tableConfig;
-  private String _tierBackend;
-  private PinotConfiguration _tierConfigs;
+  private Schema _schema;
+
+  private String _tableDataDir;
+  private String _segmentDirectoryLoader;
+  private String _segmentTier;
 
   private String _instanceId;
 
-  public IndexLoadingConfig(InstanceDataManagerConfig instanceDataManagerConfig, TableConfig tableConfig) {
+  /**
+   * NOTE: This step might modify the passed in table config and schema.
+   */
+  public IndexLoadingConfig(InstanceDataManagerConfig instanceDataManagerConfig, TableConfig tableConfig,
+      @Nullable Schema schema) {
     extractFromInstanceConfig(instanceDataManagerConfig);
-    extractFromTableConfig(tableConfig);
-    _tableConfig = tableConfig;
+    extractFromTableConfigAndSchema(tableConfig, schema);
   }
 
-  private void extractFromTableConfig(TableConfig tableConfig) {
-    _tableNameWithType = tableConfig.getTableName();
+  @VisibleForTesting
+  public IndexLoadingConfig(InstanceDataManagerConfig instanceDataManagerConfig, TableConfig tableConfig) {
+    this(instanceDataManagerConfig, tableConfig, null);
+  }
+
+  @VisibleForTesting
+  public IndexLoadingConfig() {
+  }
+
+  private void extractFromTableConfigAndSchema(TableConfig tableConfig, @Nullable Schema schema) {
+    if (schema != null) {
+      TimestampIndexUtils.applyTimestampIndex(tableConfig, schema);
+    }
+    _tableConfig = tableConfig;
+    _schema = schema;
+
     IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
     String tableReadMode = indexingConfig.getLoadMode();
     if (tableReadMode != null) {
@@ -110,17 +139,29 @@ public class IndexLoadingConfig {
     if (invertedIndexColumns != null) {
       _invertedIndexColumns.addAll(invertedIndexColumns);
     }
-    _rangeIndexVersion = indexingConfig.getRangeIndexVersion();
 
-    List<String> jsonIndexColumns = indexingConfig.getJsonIndexColumns();
-    if (jsonIndexColumns != null) {
-      _jsonIndexColumns.addAll(jsonIndexColumns);
+    // Ignore jsonIndexColumns when jsonIndexConfigs is configured
+    Map<String, JsonIndexConfig> jsonIndexConfigs = indexingConfig.getJsonIndexConfigs();
+    if (jsonIndexConfigs != null) {
+      _jsonIndexConfigs = jsonIndexConfigs;
+    } else {
+      List<String> jsonIndexColumns = indexingConfig.getJsonIndexColumns();
+      if (jsonIndexColumns != null) {
+        _jsonIndexConfigs = new HashMap<>();
+        for (String jsonIndexColumn : jsonIndexColumns) {
+          _jsonIndexConfigs.put(jsonIndexColumn, new JsonIndexConfig());
+        }
+      }
     }
 
     List<String> rangeIndexColumns = indexingConfig.getRangeIndexColumns();
     if (rangeIndexColumns != null) {
       _rangeIndexColumns.addAll(rangeIndexColumns);
     }
+
+    _rangeIndexVersion = indexingConfig.getRangeIndexVersion();
+
+    _fstIndexType = indexingConfig.getFSTIndexType();
 
     List<String> bloomFilterColumns = indexingConfig.getBloomFilterColumns();
     if (bloomFilterColumns != null) {
@@ -145,9 +186,11 @@ public class IndexLoadingConfig {
       }
     }
 
+    extractCompressionConfigs(tableConfig);
     extractTextIndexColumnsFromTableConfig(tableConfig);
     extractFSTIndexColumnsFromTableConfig(tableConfig);
     extractH3IndexConfigsFromTableConfig(tableConfig);
+    extractForwardIndexDisabledColumnsFromTableConfig(tableConfig);
 
     Map<String, String> noDictionaryConfig = indexingConfig.getNoDictionaryConfig();
     if (noDictionaryConfig != null) {
@@ -181,6 +224,28 @@ public class IndexLoadingConfig {
   }
 
   /**
+   * Extracts compressionType for each column. Populates a map containing column name as key and compression type as
+   * value. This map will only contain the compressionType overrides, and it does not correspond to the default value
+   * of compressionType (derived using SegmentColumnarIndexCreator.getColumnCompressionType())  used for a column.
+   * Note that only RAW forward index columns will be populated in this map.
+   * @param tableConfig table config
+   */
+  private void extractCompressionConfigs(TableConfig tableConfig) {
+    List<FieldConfig> fieldConfigList = tableConfig.getFieldConfigList();
+    if (fieldConfigList == null) {
+      return;
+    }
+
+    for (FieldConfig fieldConfig : fieldConfigList) {
+      String column = fieldConfig.getName();
+      if (fieldConfig.getCompressionCodec() != null) {
+        ChunkCompressionType compressionType = ChunkCompressionType.valueOf(fieldConfig.getCompressionCodec().name());
+        _compressionConfigs.put(column, compressionType);
+      }
+    }
+  }
+
+  /**
    * Text index creation info for each column is specified
    * using {@link FieldConfig} model of indicating per column
    * encoding and indexing information. Since IndexLoadingConfig
@@ -195,6 +260,10 @@ public class IndexLoadingConfig {
         String column = fieldConfig.getName();
         if (fieldConfig.getIndexType() == FieldConfig.IndexType.TEXT) {
           _textIndexColumns.add(column);
+          Map<String, String> propertiesMap = fieldConfig.getProperties();
+          if (TextIndexUtils.isFstTypeNative(propertiesMap)) {
+            _fstIndexType = FSTType.NATIVE;
+          }
         }
       }
     }
@@ -252,14 +321,32 @@ public class IndexLoadingConfig {
     _enableSplitCommitEndWithMetadata = instanceDataManagerConfig.isEnableSplitCommitEndWithMetadata();
     _segmentStoreURI =
         instanceDataManagerConfig.getConfig().getProperty(CommonConstants.Server.CONFIG_OF_SEGMENT_STORE_URI);
-    _tierBackend = instanceDataManagerConfig.getTierBackend();
-    _tierConfigs = instanceDataManagerConfig.getTierConfigs();
+    _segmentDirectoryLoader = instanceDataManagerConfig.getSegmentDirectoryLoader();
   }
 
   /**
-   * For tests only.
+   * Forward index disabled info for each column is specified
+   * using {@link FieldConfig} model of indicating per column
+   * encoding and indexing information. Since IndexLoadingConfig
+   * is created from TableConfig, we extract the no forward index info
+   * from fieldConfigList in TableConfig via the properties bag.
+   * @param tableConfig table config
    */
-  public IndexLoadingConfig() {
+  private void extractForwardIndexDisabledColumnsFromTableConfig(TableConfig tableConfig) {
+    List<FieldConfig> fieldConfigList = tableConfig.getFieldConfigList();
+    if (fieldConfigList != null) {
+      for (FieldConfig fieldConfig : fieldConfigList) {
+        Map<String, String> fieldConfigProperties = fieldConfig.getProperties();
+        if (fieldConfigProperties != null) {
+          boolean forwardIndexDisabled = Boolean.parseBoolean(
+              fieldConfigProperties.getOrDefault(FieldConfig.FORWARD_INDEX_DISABLED,
+                  FieldConfig.DEFAULT_FORWARD_INDEX_DISABLED));
+          if (forwardIndexDisabled) {
+            _forwardIndexDisabledColumns.add(fieldConfig.getName());
+          }
+        }
+      }
+    }
   }
 
   public ReadMode getReadMode() {
@@ -277,6 +364,19 @@ public class IndexLoadingConfig {
     return _sortedColumns;
   }
 
+  /**
+   * For tests only.
+   */
+  @VisibleForTesting
+  public void setSortedColumn(String sortedColumn) {
+    if (sortedColumn != null) {
+      _sortedColumns = new ArrayList<>();
+      _sortedColumns.add(sortedColumn);
+    } else {
+      _sortedColumns = Collections.emptyList();
+    }
+  }
+
   public Set<String> getInvertedIndexColumns() {
     return _invertedIndexColumns;
   }
@@ -287,6 +387,10 @@ public class IndexLoadingConfig {
 
   public int getRangeIndexVersion() {
     return _rangeIndexVersion;
+  }
+
+  public FSTType getFSTIndexType() {
+    return _fstIndexType;
   }
 
   /**
@@ -305,8 +409,8 @@ public class IndexLoadingConfig {
     return _fstIndexColumns;
   }
 
-  public Set<String> getJsonIndexColumns() {
-    return _jsonIndexColumns;
+  public Map<String, JsonIndexConfig> getJsonIndexConfigs() {
+    return _jsonIndexConfigs;
   }
 
   public Map<String, H3IndexConfig> getH3IndexConfigs() {
@@ -327,6 +431,24 @@ public class IndexLoadingConfig {
   @VisibleForTesting
   public void setInvertedIndexColumns(Set<String> invertedIndexColumns) {
     _invertedIndexColumns = invertedIndexColumns;
+  }
+
+  /**
+   * For tests only.
+   * Used by segmentPreProcessorTest to set raw columns.
+   */
+  @VisibleForTesting
+  public void setNoDictionaryColumns(Set<String> noDictionaryColumns) {
+    _noDictionaryColumns = noDictionaryColumns;
+  }
+
+  /**
+   * For tests only.
+   * Used by segmentPreProcessorTest to set compression configs.
+   */
+  @VisibleForTesting
+  public void setCompressionConfigs(Map<String, ChunkCompressionType> compressionConfigs) {
+    _compressionConfigs = compressionConfigs;
   }
 
   /**
@@ -354,8 +476,20 @@ public class IndexLoadingConfig {
   }
 
   @VisibleForTesting
+  public void setFSTIndexType(FSTType fstType) {
+    _fstIndexType = fstType;
+  }
+
+  @VisibleForTesting
   public void setJsonIndexColumns(Set<String> jsonIndexColumns) {
-    _jsonIndexColumns = jsonIndexColumns;
+    if (jsonIndexColumns != null) {
+      _jsonIndexConfigs = new HashMap<>();
+      for (String jsonIndexColumn : jsonIndexColumns) {
+        _jsonIndexConfigs.put(jsonIndexColumn, new JsonIndexConfig());
+      }
+    } else {
+      _jsonIndexConfigs = null;
+    }
   }
 
   @VisibleForTesting
@@ -373,11 +507,32 @@ public class IndexLoadingConfig {
     _onHeapDictionaryColumns = onHeapDictionaryColumns;
   }
 
+  /**
+   * For tests only.
+   */
+  @VisibleForTesting
+  public void setForwardIndexDisabledColumns(Set<String> forwardIndexDisabledColumns) {
+    _forwardIndexDisabledColumns = forwardIndexDisabledColumns == null ? Collections.emptySet()
+        : forwardIndexDisabledColumns;
+  }
+
   public Set<String> getNoDictionaryColumns() {
     return _noDictionaryColumns;
   }
 
-  public Map<String, String> getnoDictionaryConfig() {
+  /**
+   * Populates a map containing column name as key and compression type as value. This map will only contain the
+   * compressionType overrides, and it does not correspond to the default value of compressionType (derived using
+   * SegmentColumnarIndexCreator.getColumnCompressionType())  used for a column. Note that only RAW forward index
+   * columns will be populated in this map.
+   *
+   * @return a map containing column name as key and compressionType as value.
+   */
+  public Map<String, ChunkCompressionType> getCompressionConfigs() {
+    return _compressionConfigs;
+  }
+
+  public Map<String, String> getNoDictionaryConfig() {
     return _noDictionaryConfig;
   }
 
@@ -387,6 +542,10 @@ public class IndexLoadingConfig {
 
   public Set<String> getOnHeapDictionaryColumns() {
     return _onHeapDictionaryColumns;
+  }
+
+  public Set<String> getForwardIndexDisabledColumns() {
+    return _forwardIndexDisabledColumns;
   }
 
   public Map<String, BloomFilterConfig> getBloomFilterConfigs() {
@@ -457,25 +616,44 @@ public class IndexLoadingConfig {
     return _tableConfig;
   }
 
+  @Nullable
+  public Schema getSchema() {
+    return _schema;
+  }
+
   @VisibleForTesting
   public void setTableConfig(TableConfig tableConfig) {
     _tableConfig = tableConfig;
   }
 
-  public String getTierBackend() {
-    return StringUtils.isNotBlank(_tierBackend) ? _tierBackend : DEFAULT_TIER_BACKEND;
+  public String getSegmentDirectoryLoader() {
+    return StringUtils.isNotBlank(_segmentDirectoryLoader) ? _segmentDirectoryLoader
+        : SegmentDirectoryLoaderRegistry.DEFAULT_SEGMENT_DIRECTORY_LOADER_NAME;
   }
 
-  public PinotConfiguration getTierConfigs() {
-    if (_tierConfigs == null) {
-      Map<String, Object> props = new HashMap<>();
-      props.put(LocalSegmentDirectoryLoader.READ_MODE_KEY, _readMode);
-      return new PinotConfiguration(props);
-    }
-    return _tierConfigs;
+  public PinotConfiguration getSegmentDirectoryConfigs() {
+    Map<String, Object> props = new HashMap<>();
+    props.put(READ_MODE_KEY, _readMode);
+    return new PinotConfiguration(props);
   }
 
   public String getInstanceId() {
     return _instanceId;
+  }
+
+  public void setTableDataDir(String tableDataDir) {
+    _tableDataDir = tableDataDir;
+  }
+
+  public String getTableDataDir() {
+    return _tableDataDir;
+  }
+
+  public void setSegmentTier(String segmentTier) {
+    _segmentTier = segmentTier;
+  }
+
+  public String getSegmentTier() {
+    return _segmentTier;
   }
 }

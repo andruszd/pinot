@@ -25,6 +25,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.common.response.ProcessingException;
 
 
+// TODO: Clean up ProcessingException (thrift) because we don't send it through the wire
 public class QueryException {
   private QueryException() {
   }
@@ -47,12 +48,13 @@ public class QueryException {
   // TODO: several ProcessingExceptions are never used, clean them up.
   public static final int JSON_PARSING_ERROR_CODE = 100;
   public static final int JSON_COMPILATION_ERROR_CODE = 101;
-  public static final int PQL_PARSING_ERROR_CODE = 150;
+  public static final int SQL_PARSING_ERROR_CODE = 150;
   public static final int SEGMENT_PLAN_EXECUTION_ERROR_CODE = 160;
   public static final int COMBINE_SEGMENT_PLAN_TIMEOUT_ERROR_CODE = 170;
   public static final int ACCESS_DENIED_ERROR_CODE = 180;
   public static final int TABLE_DOES_NOT_EXIST_ERROR_CODE = 190;
   public static final int QUERY_EXECUTION_ERROR_CODE = 200;
+  public static final int QUERY_CANCELLATION_ERROR_CODE = 205;
   // TODO: Handle these errors in broker
   public static final int SERVER_SHUTTING_DOWN_ERROR_CODE = 210;
   public static final int SERVER_OUT_OF_CAPACITY_ERROR_CODE = 211;
@@ -60,6 +62,7 @@ public class QueryException {
   public static final int SERVER_SEGMENT_MISSING_ERROR_CODE = 235;
   public static final int QUERY_SCHEDULING_TIMEOUT_ERROR_CODE = 240;
   public static final int EXECUTION_TIMEOUT_ERROR_CODE = 250;
+  public static final int DATA_TABLE_SERIALIZATION_ERROR_CODE = 260;
   public static final int BROKER_GATHER_ERROR_CODE = 300;
   public static final int BROKER_SEGMENT_UNAVAILABLE_ERROR_CODE = 305;
   public static final int DATA_TABLE_DESERIALIZATION_ERROR_CODE = 310;
@@ -81,7 +84,7 @@ public class QueryException {
 
   public static final ProcessingException JSON_PARSING_ERROR = new ProcessingException(JSON_PARSING_ERROR_CODE);
   public static final ProcessingException JSON_COMPILATION_ERROR = new ProcessingException(JSON_COMPILATION_ERROR_CODE);
-  public static final ProcessingException PQL_PARSING_ERROR = new ProcessingException(PQL_PARSING_ERROR_CODE);
+  public static final ProcessingException SQL_PARSING_ERROR = new ProcessingException(SQL_PARSING_ERROR_CODE);
   public static final ProcessingException ACCESS_DENIED_ERROR = new ProcessingException(ACCESS_DENIED_ERROR_CODE);
   public static final ProcessingException SEGMENT_PLAN_EXECUTION_ERROR =
       new ProcessingException(SEGMENT_PLAN_EXECUTION_ERROR_CODE);
@@ -90,6 +93,8 @@ public class QueryException {
   public static final ProcessingException TABLE_DOES_NOT_EXIST_ERROR =
       new ProcessingException(TABLE_DOES_NOT_EXIST_ERROR_CODE);
   public static final ProcessingException QUERY_EXECUTION_ERROR = new ProcessingException(QUERY_EXECUTION_ERROR_CODE);
+  public static final ProcessingException QUERY_CANCELLATION_ERROR =
+      new ProcessingException(QUERY_CANCELLATION_ERROR_CODE);
   public static final ProcessingException SERVER_SCHEDULER_DOWN_ERROR =
       new ProcessingException(SERVER_SHUTTING_DOWN_ERROR_CODE);
   public static final ProcessingException SERVER_OUT_OF_CAPACITY_ERROR =
@@ -102,10 +107,14 @@ public class QueryException {
       new ProcessingException(QUERY_SCHEDULING_TIMEOUT_ERROR_CODE);
   public static final ProcessingException EXECUTION_TIMEOUT_ERROR =
       new ProcessingException(EXECUTION_TIMEOUT_ERROR_CODE);
+  public static final ProcessingException DATA_TABLE_SERIALIZATION_ERROR =
+      new ProcessingException(DATA_TABLE_SERIALIZATION_ERROR_CODE);
   public static final ProcessingException BROKER_GATHER_ERROR = new ProcessingException(BROKER_GATHER_ERROR_CODE);
   public static final ProcessingException DATA_TABLE_DESERIALIZATION_ERROR =
       new ProcessingException(DATA_TABLE_DESERIALIZATION_ERROR_CODE);
   public static final ProcessingException FUTURE_CALL_ERROR = new ProcessingException(FUTURE_CALL_ERROR_CODE);
+  public static final ProcessingException BROKER_SEGMENT_UNAVAILABLE_ERROR =
+      new ProcessingException(BROKER_SEGMENT_UNAVAILABLE_ERROR_CODE);
   public static final ProcessingException BROKER_TIMEOUT_ERROR = new ProcessingException(BROKER_TIMEOUT_ERROR_CODE);
   public static final ProcessingException BROKER_RESOURCE_MISSING_ERROR =
       new ProcessingException(BROKER_RESOURCE_MISSING_ERROR_CODE);
@@ -125,17 +134,19 @@ public class QueryException {
   static {
     JSON_PARSING_ERROR.setMessage("JsonParsingError");
     JSON_COMPILATION_ERROR.setMessage("JsonCompilationError");
-    PQL_PARSING_ERROR.setMessage("PQLParsingError");
+    SQL_PARSING_ERROR.setMessage("SQLParsingError");
     SEGMENT_PLAN_EXECUTION_ERROR.setMessage("SegmentPlanExecutionError");
     COMBINE_SEGMENT_PLAN_TIMEOUT_ERROR.setMessage("CombineSegmentPlanTimeoutError");
     TABLE_DOES_NOT_EXIST_ERROR.setMessage("TableDoesNotExistError");
     QUERY_EXECUTION_ERROR.setMessage("QueryExecutionError");
+    QUERY_CANCELLATION_ERROR.setMessage("QueryCancellationError");
     SERVER_SCHEDULER_DOWN_ERROR.setMessage("ServerShuttingDown");
     SERVER_OUT_OF_CAPACITY_ERROR.setMessage("ServerOutOfCapacity");
     SERVER_TABLE_MISSING_ERROR.setMessage("ServerTableMissing");
     SERVER_SEGMENT_MISSING_ERROR.setMessage("ServerSegmentMissing");
     QUERY_SCHEDULING_TIMEOUT_ERROR.setMessage("QuerySchedulingTimeoutError");
     EXECUTION_TIMEOUT_ERROR.setMessage("ExecutionTimeoutError");
+    DATA_TABLE_DESERIALIZATION_ERROR.setMessage("DataTableSerializationError");
     BROKER_GATHER_ERROR.setMessage("BrokerGatherError");
     DATA_TABLE_DESERIALIZATION_ERROR.setMessage("DataTableDeserializationError");
     FUTURE_CALL_ERROR.setMessage("FutureCallError");
@@ -152,8 +163,8 @@ public class QueryException {
     QUOTA_EXCEEDED_ERROR.setMessage("QuotaExceededError");
   }
 
-  public static ProcessingException getException(ProcessingException processingException, Exception exception) {
-    return getException(processingException, getTruncatedStackTrace(exception));
+  public static ProcessingException getException(ProcessingException processingException, Throwable t) {
+    return getException(processingException, getTruncatedStackTrace(t));
   }
 
   public static ProcessingException getException(ProcessingException processingException, String errorMessage) {
@@ -163,9 +174,9 @@ public class QueryException {
     return copiedProcessingException;
   }
 
-  public static String getTruncatedStackTrace(Throwable exception) {
+  public static String getTruncatedStackTrace(Throwable t) {
     StringWriter stringWriter = new StringWriter();
-    exception.printStackTrace(new PrintWriter(stringWriter));
+    t.printStackTrace(new PrintWriter(stringWriter));
     String fullStackTrace = stringWriter.toString();
     String[] lines = StringUtils.split(fullStackTrace, '\n');
     // exception should at least have one line, no need to check here.
@@ -204,7 +215,7 @@ public class QueryException {
       case QueryException.JSON_PARSING_ERROR_CODE:
       case QueryException.QUERY_VALIDATION_ERROR_CODE:
       case QueryException.UNKNOWN_COLUMN_ERROR_CODE:
-      case QueryException.PQL_PARSING_ERROR_CODE:
+      case QueryException.SQL_PARSING_ERROR_CODE:
       case QueryException.TOO_MANY_REQUESTS_ERROR_CODE:
       case QueryException.TABLE_DOES_NOT_EXIST_ERROR_CODE:
         return true;

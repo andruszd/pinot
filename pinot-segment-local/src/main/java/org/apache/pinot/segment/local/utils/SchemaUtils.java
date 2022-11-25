@@ -20,8 +20,10 @@ package org.apache.pinot.segment.local.utils;
 
 import com.google.common.base.Preconditions;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.segment.local.function.FunctionEvaluator;
@@ -34,6 +36,7 @@ import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.TimeFieldSpec;
 import org.apache.pinot.spi.data.TimeGranularitySpec;
+import org.apache.pinot.spi.utils.TimeUtils;
 
 
 /**
@@ -42,6 +45,16 @@ import org.apache.pinot.spi.data.TimeGranularitySpec;
  */
 public class SchemaUtils {
   private SchemaUtils() {
+  }
+
+  // checker to ensure simple date format matches lexicographic ordering.
+  private static final Map<Character, Integer> DATETIME_PATTERN_ORDERING = new HashMap<>();
+
+  static {
+    char[] patternOrdering = new char[]{'y', 'M', 'd', 'H', 'm', 's', 'S'};
+    for (int i = 0; i < patternOrdering.length; i++) {
+      DATETIME_PATTERN_ORDERING.put(patternOrdering[i], i);
+    }
   }
 
   public static final String MAP_KEY_COLUMN_SUFFIX = "__KEYS";
@@ -109,10 +122,10 @@ public class SchemaUtils {
           }
         }
         if (fieldSpec.getFieldType().equals(FieldSpec.FieldType.TIME)) {
-          validateTimeFieldSpec(fieldSpec);
+          validateTimeFieldSpec((TimeFieldSpec) fieldSpec);
         }
         if (fieldSpec.getFieldType().equals(FieldSpec.FieldType.DATE_TIME)) {
-          validateDateTimeFieldSpec(fieldSpec);
+          validateDateTimeFieldSpec((DateTimeFieldSpec) fieldSpec);
         }
       }
     }
@@ -121,8 +134,8 @@ public class SchemaUtils {
         transformedColumns.retainAll(argumentColumns));
     if (schema.getPrimaryKeyColumns() != null) {
       for (String primaryKeyColumn : schema.getPrimaryKeyColumns()) {
-        Preconditions
-            .checkState(primaryKeyColumnCandidates.contains(primaryKeyColumn), "The primary key column must exist");
+        Preconditions.checkState(primaryKeyColumnCandidates.contains(primaryKeyColumn),
+            "The primary key column must exist");
       }
     }
   }
@@ -143,8 +156,7 @@ public class SchemaUtils {
   /**
    * Checks for valid incoming and outgoing granularity spec in the time field spec
    */
-  private static void validateTimeFieldSpec(FieldSpec fieldSpec) {
-    TimeFieldSpec timeFieldSpec = (TimeFieldSpec) fieldSpec;
+  private static void validateTimeFieldSpec(TimeFieldSpec timeFieldSpec) {
     TimeGranularitySpec incomingGranularitySpec = timeFieldSpec.getIncomingGranularitySpec();
     TimeGranularitySpec outgoingGranularitySpec = timeFieldSpec.getOutgoingGranularitySpec();
 
@@ -156,16 +168,60 @@ public class SchemaUtils {
       Preconditions.checkState(
           incomingGranularitySpec.getTimeFormat().equals(TimeGranularitySpec.TimeFormat.EPOCH.toString())
               && outgoingGranularitySpec.getTimeFormat().equals(TimeGranularitySpec.TimeFormat.EPOCH.toString()),
-          "Cannot perform time conversion for time format other than EPOCH. TimeFieldSpec: %s", fieldSpec);
+          "Cannot perform time conversion for time format other than EPOCH. TimeFieldSpec: %s", timeFieldSpec);
     }
   }
 
   /**
    * Checks for valid format and granularity string in dateTimeFieldSpec
    */
-  private static void validateDateTimeFieldSpec(FieldSpec fieldSpec) {
-    DateTimeFieldSpec dateTimeFieldSpec = (DateTimeFieldSpec) fieldSpec;
-    DateTimeFormatSpec.validateFormat(dateTimeFieldSpec.getFormat());
-    DateTimeGranularitySpec.validateGranularity(dateTimeFieldSpec.getGranularity());
+  private static void validateDateTimeFieldSpec(DateTimeFieldSpec dateTimeFieldSpec) {
+    DateTimeFormatSpec formatSpec;
+    try {
+      formatSpec = dateTimeFieldSpec.getFormatSpec();
+    } catch (Exception e) {
+      throw new IllegalArgumentException("Invalid format: " + dateTimeFieldSpec.getFormat(), e);
+    }
+    String sdfPattern = formatSpec.getSDFPattern();
+    if (sdfPattern != null) {
+      // must be in "yyyy MM dd HH mm ss SSS" to make sure it is sorted by both lexicographical and datetime order.
+      int[] maxIndexes = new int[]{-1, -1, -1, -1, -1, -1, -1, -1};
+      for (int idx = 0; idx < sdfPattern.length(); idx++) {
+        int charIndex = DATETIME_PATTERN_ORDERING.getOrDefault(sdfPattern.charAt(idx), 7);
+        maxIndexes[charIndex] = idx;
+      }
+      // last index doesn't need to be checked.
+      for (int idx = 0; idx < maxIndexes.length - 2; idx++) {
+        Preconditions.checkArgument(maxIndexes[idx] <= maxIndexes[idx + 1] || maxIndexes[idx + 1] == -1,
+            String.format("SIMPLE_DATE_FORMAT pattern %s has to be sorted by both lexicographical and datetime order",
+                sdfPattern));
+        maxIndexes[idx + 1] = Math.max(maxIndexes[idx + 1], maxIndexes[idx]);
+      }
+    }
+
+    Object sampleValue = dateTimeFieldSpec.getSampleValue();
+    if (sampleValue != null) {
+      long sampleTimestampValue;
+      try {
+        sampleTimestampValue = formatSpec.fromFormatToMillis(sampleValue.toString());
+      } catch (Exception e) {
+        throw new IllegalArgumentException(
+            String.format("Cannot format provided sample value: %s with provided date time spec: %s", sampleValue,
+                formatSpec));
+      }
+      boolean isValidTimestamp = TimeUtils.timeValueInValidRange(sampleTimestampValue);
+      Preconditions.checkArgument(isValidTimestamp,
+          "Incorrect date time format. "
+              + "Converted sample value %s for date-time field spec is not in valid time-range: %s and %s",
+          sampleTimestampValue, TimeUtils.VALID_MIN_TIME_MILLIS, TimeUtils.VALID_MAX_TIME_MILLIS);
+    }
+
+    DateTimeGranularitySpec granularitySpec;
+    try {
+      granularitySpec = dateTimeFieldSpec.getGranularitySpec();
+    } catch (Exception e) {
+      throw new IllegalArgumentException("Invalid granularity: " + dateTimeFieldSpec.getGranularity(), e);
+    }
+    Preconditions.checkNotNull(granularitySpec);
   }
 }

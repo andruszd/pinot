@@ -29,10 +29,10 @@ import org.apache.helix.HelixManager;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.utils.LLCSegmentName;
-import org.apache.pinot.common.utils.StringUtil;
 import org.apache.pinot.common.utils.helix.HelixHelper;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.StringUtil;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.spi.utils.retry.RetryPolicies;
 import org.slf4j.Logger;
@@ -64,7 +64,11 @@ public class PeerServerSegmentFinder {
     LLCSegmentName llcSegmentName = new LLCSegmentName(segmentName);
     String tableNameWithType =
         TableNameBuilder.forType(TableType.REALTIME).tableNameWithType(llcSegmentName.getTableName());
+    return getPeerServerURIs(segmentName, downloadScheme, helixManager, tableNameWithType);
+  }
 
+  public static List<URI> getPeerServerURIs(String segmentName, String downloadScheme,
+      HelixManager helixManager, String tableNameWithType) {
     HelixAdmin helixAdmin = helixManager.getClusterManagmentTool();
     String clusterName = helixManager.getClusterName();
     if (clusterName == null) {

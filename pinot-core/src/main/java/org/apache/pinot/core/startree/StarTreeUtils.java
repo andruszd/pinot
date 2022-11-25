@@ -18,11 +18,11 @@
  */
 package org.apache.pinot.core.startree;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -35,7 +35,6 @@ import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
-import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
@@ -46,16 +45,6 @@ import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
 @SuppressWarnings("rawtypes")
 public class StarTreeUtils {
   private StarTreeUtils() {
-  }
-
-  public static final String USE_STAR_TREE_KEY = "useStarTree";
-
-  /**
-   * Returns whether star-tree is disabled for the query.
-   */
-  public static boolean isStarTreeDisabled(QueryContext queryContext) {
-    Map<String, String> debugOptions = queryContext.getDebugOptions();
-    return debugOptions != null && "false".equalsIgnoreCase(debugOptions.get(USE_STAR_TREE_KEY));
   }
 
   /**
@@ -94,13 +83,13 @@ public class StarTreeUtils {
    */
   @Nullable
   public static Map<String, List<CompositePredicateEvaluator>> extractPredicateEvaluatorsMap(IndexSegment indexSegment,
-      @Nullable FilterContext filter, Map<Predicate, PredicateEvaluator> predicateEvaluatorMap) {
+      @Nullable FilterContext filter, List<Pair<Predicate, PredicateEvaluator>> predicateEvaluatorMapping) {
     if (filter == null) {
       return Collections.emptyMap();
     }
 
     Map<String, List<CompositePredicateEvaluator>> predicateEvaluatorsMap = new HashMap<>();
-    Queue<FilterContext> queue = new LinkedList<>();
+    Queue<FilterContext> queue = new ArrayDeque<>();
     queue.add(filter);
     FilterContext filterNode;
     while ((filterNode = queue.poll()) != null) {
@@ -110,7 +99,7 @@ public class StarTreeUtils {
           break;
         case OR:
           Pair<String, List<PredicateEvaluator>> pair =
-              isOrClauseValidForStarTree(indexSegment, filterNode, predicateEvaluatorMap);
+              isOrClauseValidForStarTree(indexSegment, filterNode, predicateEvaluatorMapping);
           if (pair == null) {
             return null;
           }
@@ -121,9 +110,13 @@ public class StarTreeUtils {
                 .add(new CompositePredicateEvaluator(predicateEvaluators));
           }
           break;
+        case NOT:
+          // TODO: Support NOT in star-tree
+          return null;
         case PREDICATE:
           Predicate predicate = filterNode.getPredicate();
-          PredicateEvaluator predicateEvaluator = getPredicateEvaluator(indexSegment, predicate, predicateEvaluatorMap);
+          PredicateEvaluator predicateEvaluator = getPredicateEvaluator(indexSegment, predicate,
+              predicateEvaluatorMapping);
           if (predicateEvaluator == null) {
             // The predicate cannot be solved with star-tree
             return null;
@@ -184,16 +177,18 @@ public class StarTreeUtils {
    */
   @Nullable
   private static Pair<String, List<PredicateEvaluator>> isOrClauseValidForStarTree(IndexSegment indexSegment,
-      FilterContext filter, Map<Predicate, PredicateEvaluator> predicateEvaluatorMap) {
+      FilterContext filter, List<Pair<Predicate, PredicateEvaluator>> predicateEvaluatorMapping) {
     assert filter.getType() == FilterContext.Type.OR;
 
     List<Predicate> predicates = new ArrayList<>();
-    extractOrClausePredicates(filter, predicates);
+    if (!extractOrClausePredicates(filter, predicates)) {
+      return null;
+    }
 
     String identifier = null;
     List<PredicateEvaluator> predicateEvaluators = new ArrayList<>();
     for (Predicate predicate : predicates) {
-      PredicateEvaluator predicateEvaluator = getPredicateEvaluator(indexSegment, predicate, predicateEvaluatorMap);
+      PredicateEvaluator predicateEvaluator = getPredicateEvaluator(indexSegment, predicate, predicateEvaluatorMapping);
       if (predicateEvaluator == null) {
         // The predicate cannot be solved with star-tree
         return null;
@@ -219,7 +214,9 @@ public class StarTreeUtils {
   }
 
   /**
-   * Extracts the predicates under the given OR clause, returns {@code false} if there is nested AND under OR clause.
+   * Extracts the predicates under the given OR clause, returns {@code false} if there is nested AND or NOT under OR
+   * clause.
+   * TODO: Support NOT in star-tree
    */
   private static boolean extractOrClausePredicates(FilterContext filter, List<Predicate> predicates) {
     assert filter.getType() == FilterContext.Type.OR;
@@ -227,6 +224,7 @@ public class StarTreeUtils {
     for (FilterContext child : filter.getChildren()) {
       switch (child.getType()) {
         case AND:
+        case NOT:
           return false;
         case OR:
           if (!extractOrClausePredicates(child, predicates)) {
@@ -250,7 +248,7 @@ public class StarTreeUtils {
    */
   @Nullable
   private static PredicateEvaluator getPredicateEvaluator(IndexSegment indexSegment, Predicate predicate,
-      Map<Predicate, PredicateEvaluator> predicateEvaluatorMap) {
+      List<Pair<Predicate, PredicateEvaluator>> predicatesEvaluatorMapping) {
     ExpressionContext lhs = predicate.getLhs();
     if (lhs.getType() != ExpressionContext.Type.IDENTIFIER) {
       // Star-tree does not support non-identifier expression
@@ -275,6 +273,11 @@ public class StarTreeUtils {
       default:
         break;
     }
-    return predicateEvaluatorMap.get(predicate);
+    for (Pair<Predicate, PredicateEvaluator> pair : predicatesEvaluatorMapping) {
+      if (pair.getKey().equals(predicate)) {
+        return pair.getValue();
+      }
+    }
+    return null;
   }
 }

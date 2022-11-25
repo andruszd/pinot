@@ -31,12 +31,14 @@ import java.io.OutputStreamWriter;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
@@ -67,6 +69,7 @@ import org.yaml.snakeyaml.Yaml;
 public class PerfBenchmarkDriver {
   private static final Logger LOGGER = LoggerFactory.getLogger(PerfBenchmarkDriver.class);
   private static final long BROKER_TIMEOUT_MS = 60_000L;
+  private static final String BROKER_QUERY_PATH = "/query/sql";
 
   private final PerfBenchmarkDriverConf _conf;
   private final String _zkAddress;
@@ -82,7 +85,7 @@ public class PerfBenchmarkDriver {
   private String _controllerAddress;
   private String _controllerDataDir;
 
-  private String _brokerBaseApiUrl;
+  private String _queryUrl;
 
   private String _serverInstanceDataDir;
   private String _serverInstanceSegmentTarDir;
@@ -143,7 +146,8 @@ public class PerfBenchmarkDriver {
     }
 
     // Init broker.
-    _brokerBaseApiUrl = "http://" + _conf.getBrokerHost() + ":" + _conf.getBrokerPort();
+    _queryUrl = StringUtils.isNotBlank(_conf.getBrokerURL()) ? _conf.getBrokerURL() + BROKER_QUERY_PATH
+        : "http://" + _conf.getBrokerHost() + ":" + _conf.getBrokerPort() + BROKER_QUERY_PATH;
 
     // Init server.
     String serverInstanceName = _conf.getServerInstanceName();
@@ -236,7 +240,7 @@ public class PerfBenchmarkDriver {
     String brokerInstanceName = "Broker_localhost_" + CommonConstants.Helix.DEFAULT_BROKER_QUERY_PORT;
 
     Map<String, Object> properties = new HashMap<>();
-    properties.put(CommonConstants.Helix.Instance.INSTANCE_ID_KEY, brokerInstanceName);
+    properties.put(CommonConstants.Broker.CONFIG_OF_BROKER_ID, brokerInstanceName);
     properties.put(CommonConstants.Broker.CONFIG_OF_BROKER_TIMEOUT_MS, BROKER_TIMEOUT_MS);
     properties.put(CommonConstants.Helix.CONFIG_OF_CLUSTER_NAME, _clusterName);
     properties.put(CommonConstants.Helix.CONFIG_OF_ZOOKEEPR_SERVER, _zkAddress);
@@ -362,8 +366,8 @@ public class PerfBenchmarkDriver {
     Set<String> tableAndBrokerResources = new HashSet<>();
     for (String resourceName : allResourcesInCluster) {
       // Only check table resources and broker resource
-      if (TableNameBuilder.isTableResource(resourceName) || resourceName
-          .equals(CommonConstants.Helix.BROKER_RESOURCE_INSTANCE)) {
+      if (TableNameBuilder.isTableResource(resourceName) || resourceName.equals(
+          CommonConstants.Helix.BROKER_RESOURCE_INSTANCE)) {
         tableAndBrokerResources.add(resourceName);
       }
     }
@@ -403,34 +407,23 @@ public class PerfBenchmarkDriver {
 
   public JsonNode postQuery(String query)
       throws Exception {
-    return postQuery(_conf.getDialect(), query);
+    return postQuery(query, Collections.emptyMap());
   }
 
-  public JsonNode postQuery(String dialect, String query)
-      throws Exception {
-    return postQuery(dialect, query, new HashMap<>());
-  }
-
-  public JsonNode postQuery(String dialect, String query, Map<String, String> headers)
+  public JsonNode postQuery(String query, Map<String, String> headers)
       throws Exception {
     ObjectNode requestJson = JsonUtils.newObjectNode();
-    requestJson.put(dialect, query);
+    requestJson.put("sql", query);
 
     long start = System.currentTimeMillis();
-    String queryUrl = _brokerBaseApiUrl + "/query";
-    if (!"pql".equals(dialect)) {
-      queryUrl = _brokerBaseApiUrl + "/query/" + dialect;
-    }
-
-    URLConnection conn = new URL(queryUrl).openConnection();
+    URLConnection conn = new URL(_queryUrl).openConnection();
     conn.setDoOutput(true);
-
+    for (Map.Entry<String, String> header : headers.entrySet()) {
+      conn.setRequestProperty(header.getKey(), header.getValue());
+    }
     try (BufferedWriter writer = new BufferedWriter(
         new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8))) {
       String requestString = requestJson.toString();
-      for (Map.Entry<String, String> header : headers.entrySet()) {
-        writer.write(String.format("%s: %s\n", header.getKey(), header.getValue()));
-      }
       writer.write(requestString);
       writer.flush();
 
@@ -494,7 +487,7 @@ public class PerfBenchmarkDriver {
   public static void main(String[] args)
       throws Exception {
     PluginManager.get().init();
-    PerfBenchmarkDriverConf conf = (PerfBenchmarkDriverConf) new Yaml().load(new FileInputStream(args[0]));
+    PerfBenchmarkDriverConf conf = new Yaml().load(new FileInputStream(args[0]));
     PerfBenchmarkDriver perfBenchmarkDriver = new PerfBenchmarkDriver(conf);
     perfBenchmarkDriver.run();
   }

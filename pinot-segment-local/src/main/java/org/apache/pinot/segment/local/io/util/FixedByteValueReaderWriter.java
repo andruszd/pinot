@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.segment.local.io.util;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 
@@ -51,19 +53,56 @@ public final class FixedByteValueReaderWriter implements ValueReader {
     return _dataBuffer.getDouble((long) index * Double.BYTES);
   }
 
+  /**
+   * Reads the unpadded bytes into the given buffer and returns the length.
+   */
+  private int readUnpaddedBytes(int index, int numBytesPerValue, byte paddingByte, byte[] buffer) {
+    // Based on the ZeroInWord algorithm: http://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
+    assert buffer.length >= numBytesPerValue;
+    long startOffset = (long) index * numBytesPerValue;
+    long pattern = (paddingByte & 0xFFL) * 0x101010101010101L;
+    ByteBuffer wrapper = ByteBuffer.wrap(buffer);
+    if (_dataBuffer.order() == ByteOrder.LITTLE_ENDIAN) {
+      wrapper.order(ByteOrder.LITTLE_ENDIAN);
+    }
+    int position = 0;
+    int endIndex = numBytesPerValue & 0xFFFFFFF8;
+    for (int i = 0; i < endIndex; i += Long.BYTES) {
+      long word = _dataBuffer.getLong(startOffset + i);
+      wrapper.putLong(i, word);
+      long zeroed = word ^ pattern;
+      long tmp = (zeroed & 0x7F7F7F7F7F7F7F7FL) + 0x7F7F7F7F7F7F7F7FL;
+      tmp = ~(tmp | zeroed | 0x7F7F7F7F7F7F7F7FL);
+      if (tmp == 0) {
+        position += 8;
+      } else {
+        position += _dataBuffer.order() == ByteOrder.LITTLE_ENDIAN ? Long.numberOfTrailingZeros(tmp) >>> 3
+            : Long.numberOfLeadingZeros(tmp) >>> 3;
+        return position;
+      }
+    }
+    for (; position < numBytesPerValue; position++) {
+      byte b = _dataBuffer.getByte(startOffset + position);
+      if (b == paddingByte) {
+        break;
+      }
+      buffer[position] = b;
+    }
+    return position;
+  }
+
+  @Override
+  public byte[] getUnpaddedBytes(int index, int numBytesPerValue, byte paddingByte, byte[] buffer) {
+    int length = readUnpaddedBytes(index, numBytesPerValue, paddingByte, buffer);
+    byte[] bytes = new byte[length];
+    System.arraycopy(buffer, 0, bytes, 0, length);
+    return bytes;
+  }
+
   @Override
   public String getUnpaddedString(int index, int numBytesPerValue, byte paddingByte, byte[] buffer) {
-    assert buffer.length >= numBytesPerValue;
-
-    long startOffset = (long) index * numBytesPerValue;
-    for (int i = 0; i < numBytesPerValue; i++) {
-      byte currentByte = _dataBuffer.getByte(startOffset + i);
-      if (currentByte == paddingByte) {
-        return new String(buffer, 0, i, UTF_8);
-      }
-      buffer[i] = currentByte;
-    }
-    return new String(buffer, 0, numBytesPerValue, UTF_8);
+    int length = readUnpaddedBytes(index, numBytesPerValue, paddingByte, buffer);
+    return new String(buffer, 0, length, UTF_8);
   }
 
   @Override

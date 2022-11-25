@@ -18,26 +18,29 @@
  */
 package org.apache.pinot.controller.api;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import org.apache.pinot.common.utils.PinotAppConfigs;
 import org.apache.pinot.controller.ControllerConf;
-import org.apache.pinot.controller.ControllerTestUtils;
+import org.apache.pinot.controller.helix.ControllerTest;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.Obfuscator;
-import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
+
+import static org.testng.Assert.assertEquals;
 
 
 /**
  * Test for {@link org.apache.pinot.controller.api.resources.PinotControllerAppConfigs} class.
  */
 public class PinotControllerAppConfigsTest {
+  private static final ControllerTest TEST_INSTANCE = ControllerTest.getInstance();
+
   @BeforeClass
   public void setUp()
       throws Exception {
-    ControllerTestUtils.setupClusterAndValidate();
+    TEST_INSTANCE.setupSharedStateAndValidate();
   }
 
   /**
@@ -48,35 +51,33 @@ public class PinotControllerAppConfigsTest {
   @Test
   public void testControllerAppConfigs()
       throws IOException {
-    ControllerConf expectedControllerConf = ControllerTestUtils.getControllerConfig();
+    ControllerConf expectedControllerConf = TEST_INSTANCE.getControllerConfig();
     PinotAppConfigs expected = new PinotAppConfigs(expectedControllerConf);
 
-    String configsJson =
-        ControllerTestUtils.sendGetRequest(ControllerTestUtils.getControllerRequestURLBuilder().forAppConfigs());
-    ObjectMapper mapper = new ObjectMapper();
-    PinotAppConfigs actual = mapper.readValue(configsJson, PinotAppConfigs.class);
+    String configsJson = ControllerTest.sendGetRequest(TEST_INSTANCE.getControllerRequestURLBuilder().forAppConfigs());
+    PinotAppConfigs actual = JsonUtils.stringToObject(configsJson, PinotAppConfigs.class);
 
     // RuntimeConfig is not checked as it has information that can change during the test run.
     // Also, some of the system configs can change, so compare the ones that don't.
     PinotAppConfigs.SystemConfig actualSystemConfig = actual.getSystemConfig();
     PinotAppConfigs.SystemConfig expectedSystemConfig = expected.getSystemConfig();
 
-    Assert.assertEquals(actualSystemConfig.getName(), expectedSystemConfig.getName());
-    Assert.assertEquals(actualSystemConfig.getVersion(), expectedSystemConfig.getVersion());
-    Assert.assertEquals(actualSystemConfig.getAvailableProcessors(), expectedSystemConfig.getAvailableProcessors());
-    Assert.assertEquals(actualSystemConfig.getTotalPhysicalMemory(), expectedSystemConfig.getTotalPhysicalMemory());
-    Assert.assertEquals(actualSystemConfig.getTotalSwapSpace(), expectedSystemConfig.getTotalSwapSpace());
+    assertEquals(actualSystemConfig.getName(), expectedSystemConfig.getName());
+    assertEquals(actualSystemConfig.getVersion(), expectedSystemConfig.getVersion());
+    assertEquals(actualSystemConfig.getAvailableProcessors(), expectedSystemConfig.getAvailableProcessors());
+    assertEquals(actualSystemConfig.getTotalPhysicalMemory(), expectedSystemConfig.getTotalPhysicalMemory());
+    assertEquals(actualSystemConfig.getTotalSwapSpace(), expectedSystemConfig.getTotalSwapSpace());
 
     // tests Equals on obfuscated expected and actual
     Obfuscator obfuscator = new Obfuscator();
     String obfuscatedExpectedJson = obfuscator.toJsonString(expected);
-    PinotAppConfigs obfuscatedExpected = mapper.readValue(obfuscatedExpectedJson, PinotAppConfigs.class);
-    Assert.assertEquals(actual.getJvmConfig(), obfuscatedExpected.getJvmConfig());
-    Assert.assertEquals(actual.getPinotConfig(), obfuscatedExpected.getPinotConfig());
+    PinotAppConfigs obfuscatedExpected = JsonUtils.stringToObject(obfuscatedExpectedJson, PinotAppConfigs.class);
+    assertEquals(actual.getJvmConfig(), obfuscatedExpected.getJvmConfig());
+    assertEquals(actual.getPinotConfig(), obfuscatedExpected.getPinotConfig());
   }
 
   @AfterClass
   public void tearDown() {
-    ControllerTestUtils.cleanup();
+    TEST_INSTANCE.cleanup();
   }
 }

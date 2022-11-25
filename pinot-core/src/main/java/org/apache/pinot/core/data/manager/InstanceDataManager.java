@@ -25,10 +25,11 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.helix.HelixManager;
-import org.apache.helix.ZNRecord;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.core.data.manager.realtime.SegmentUploader;
+import org.apache.pinot.core.util.SegmentRefreshSemaphore;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -66,6 +67,12 @@ public interface InstanceDataManager {
   void shutDown();
 
   /**
+   * Delete a table.
+   */
+  void deleteTable(String tableNameWithType)
+      throws Exception;
+
+  /**
    * Adds a segment from local disk into an OFFLINE table.
    */
   void addOfflineSegment(String offlineTableName, String segmentName, File indexDir)
@@ -79,9 +86,15 @@ public interface InstanceDataManager {
       throws Exception;
 
   /**
-   * Removes a segment from a table.
+   * Offloads a segment from table but not dropping its data from server.
    */
-  void removeSegment(String tableNameWithType, String segmentName)
+  void offloadSegment(String tableNameWithType, String segmentName)
+      throws Exception;
+
+  /**
+   * Delete segment data from the server physically.
+   */
+  void deleteSegment(String tableNameWithType, String segmentName)
       throws Exception;
 
   /**
@@ -93,9 +106,20 @@ public interface InstanceDataManager {
       throws Exception;
 
   /**
-   * Reloads all segments in a table.
+   * Reloads all segments of a table.
+   * @param segmentRefreshSemaphore semaphore to control concurrent segment reloads/refresh
    */
-  void reloadAllSegments(String tableNameWithType, boolean forceDownload)
+  void reloadAllSegments(String tableNameWithType, boolean forceDownload,
+      SegmentRefreshSemaphore segmentRefreshSemaphore)
+      throws Exception;
+
+  /**
+   * Reload a list of segments in a table.
+   * @param segmentNames is the list of segment to reload
+   * @param segmentRefreshSemaphore semaphore to control concurrent segment reloads/refresh
+   */
+  void reloadSegments(String tableNameWithType, List<String> segmentNames, boolean forceDownload,
+      SegmentRefreshSemaphore segmentRefreshSemaphore)
       throws Exception;
 
   /**
@@ -154,4 +178,9 @@ public interface InstanceDataManager {
    * uploaded segment file. Servers utilize segment uploader to upload llc segment to segment store.
    */
   SegmentUploader getSegmentUploader();
+
+  /**
+   * Immediately stop consumption and start committing the consuming segments.
+   */
+  void forceCommit(String tableNameWithType, Set<String> segmentNames);
 }

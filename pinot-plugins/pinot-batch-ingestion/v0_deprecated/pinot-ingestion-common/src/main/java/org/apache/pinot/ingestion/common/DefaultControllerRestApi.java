@@ -19,7 +19,6 @@
 package org.apache.pinot.ingestion.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +28,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.SimpleHttpResponse;
+import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.ingestion.utils.PushLocation;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
@@ -66,7 +66,7 @@ public class DefaultControllerRestApi implements ControllerRestApi {
   public TableConfig getTableConfig() {
     for (PushLocation pushLocation : _pushLocations) {
       try {
-        SimpleHttpResponse response = _fileUploadDownloadClient.sendGetRequest(FileUploadDownloadClient
+        SimpleHttpResponse response = _fileUploadDownloadClient.getHttpClient().sendGetRequest(FileUploadDownloadClient
             .getRetrieveTableConfigHttpURI(pushLocation.getHost(), pushLocation.getPort(), _rawTableName));
         JsonNode offlineJsonTableConfig = JsonUtils.stringToJsonNode(response.getResponse()).get(OFFLINE);
         if (offlineJsonTableConfig != null) {
@@ -89,7 +89,7 @@ public class DefaultControllerRestApi implements ControllerRestApi {
   public Schema getSchema() {
     for (PushLocation pushLocation : _pushLocations) {
       try {
-        SimpleHttpResponse response = _fileUploadDownloadClient.sendGetRequest(FileUploadDownloadClient
+        SimpleHttpResponse response = _fileUploadDownloadClient.getHttpClient().sendGetRequest(FileUploadDownloadClient
             .getRetrieveSchemaHttpURI(pushLocation.getHost(), pushLocation.getPort(), _rawTableName));
         Schema schema = Schema.fromString(response.getResponse());
         LOGGER.info("Got schema: {}", schema);
@@ -119,7 +119,7 @@ public class DefaultControllerRestApi implements ControllerRestApi {
             SimpleHttpResponse response = _fileUploadDownloadClient.uploadSegment(
                 FileUploadDownloadClient.getUploadSegmentHttpURI(pushLocation.getHost(), pushLocation.getPort()),
                 segmentName, inputStream, null, FileUploadDownloadClient.makeTableParam(_rawTableName),
-                FileUploadDownloadClient.DEFAULT_SOCKET_TIMEOUT_MS);
+                HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
             LOGGER.info("Response {}: {}", response.getStatusCode(), response.getResponse());
             break;
           } catch (Exception e) {
@@ -168,9 +168,9 @@ public class DefaultControllerRestApi implements ControllerRestApi {
       for (PushLocation pushLocation : _pushLocations) {
         LOGGER.info("Sending deleting segment URI: {} to location: {}", segmentUri, pushLocation);
         try {
-          SimpleHttpResponse response = _fileUploadDownloadClient.sendDeleteRequest(FileUploadDownloadClient
-              .getDeleteSegmentHttpUri(pushLocation.getHost(), pushLocation.getPort(), _rawTableName, segmentUri,
-                  "OFFLINE"));
+          SimpleHttpResponse response = _fileUploadDownloadClient.getHttpClient().sendDeleteRequest(
+              FileUploadDownloadClient.getDeleteSegmentHttpUri(pushLocation.getHost(), pushLocation.getPort(),
+                  _rawTableName, segmentUri, "OFFLINE"));
           LOGGER.info("Response {}: {}", response.getStatusCode(), response.getResponse());
         } catch (Exception e) {
           LOGGER.error("Caught exception while deleting segment URI: {} to location: {}", segmentUri, pushLocation, e);
@@ -183,14 +183,13 @@ public class DefaultControllerRestApi implements ControllerRestApi {
   @Override
   public List<String> getAllSegments(String tableType) {
     LOGGER.info("Getting all segments of table {}", _rawTableName);
-    ObjectMapper objectMapper = new ObjectMapper();
     for (PushLocation pushLocation : _pushLocations) {
       try {
-        SimpleHttpResponse response = _fileUploadDownloadClient.sendGetRequest(FileUploadDownloadClient
+        SimpleHttpResponse response = _fileUploadDownloadClient.getHttpClient().sendGetRequest(FileUploadDownloadClient
             .getRetrieveAllSegmentWithTableTypeHttpUri(pushLocation.getHost(), pushLocation.getPort(), _rawTableName,
                 tableType));
         JsonNode segmentList = getSegmentsFromJsonSegmentAPI(response.getResponse(), tableType);
-        return objectMapper.convertValue(segmentList, ArrayList.class);
+        return JsonUtils.jsonNodeToObject(segmentList, ArrayList.class);
       } catch (Exception e) {
         LOGGER.warn("Caught exception while getting all {} segments for table: {} from push location: {}", tableType,
             _rawTableName, pushLocation, e);

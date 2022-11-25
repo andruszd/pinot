@@ -18,34 +18,34 @@
  */
 package org.apache.pinot.core.query.selection;
 
-import java.io.Serializable;
-import java.sql.Timestamp;
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
+import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
 import org.apache.pinot.common.response.broker.ResultTable;
-import org.apache.pinot.common.response.broker.SelectionResults;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
-import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.core.common.datatable.DataTableBuilder;
+import org.apache.pinot.core.common.datatable.DataTableBuilderFactory;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.spi.utils.ArrayCopyUtils;
 import org.apache.pinot.spi.utils.ByteArray;
+import org.apache.pinot.spi.utils.LoopUtils;
+import org.roaringbitmap.RoaringBitmap;
 
 
 /**
@@ -73,21 +73,6 @@ public class SelectionOperatorUtils {
 
   public static final ExpressionContext IDENTIFIER_STAR = ExpressionContext.forIdentifier("*");
   public static final int MAX_ROW_HOLDER_INITIAL_CAPACITY = 10_000;
-
-  private static final String INT_PATTERN = "##########";
-  private static final String LONG_PATTERN = "####################";
-  private static final String FLOAT_PATTERN = "#########0.0####";
-  private static final String DOUBLE_PATTERN = "###################0.0#########";
-  private static final DecimalFormatSymbols DECIMAL_FORMAT_SYMBOLS = DecimalFormatSymbols.getInstance(Locale.US);
-
-  private static final ThreadLocal<DecimalFormat> THREAD_LOCAL_INT_FORMAT =
-      ThreadLocal.withInitial(() -> new DecimalFormat(INT_PATTERN, DECIMAL_FORMAT_SYMBOLS));
-  private static final ThreadLocal<DecimalFormat> THREAD_LOCAL_LONG_FORMAT =
-      ThreadLocal.withInitial(() -> new DecimalFormat(LONG_PATTERN, DECIMAL_FORMAT_SYMBOLS));
-  private static final ThreadLocal<DecimalFormat> THREAD_LOCAL_FLOAT_FORMAT =
-      ThreadLocal.withInitial(() -> new DecimalFormat(FLOAT_PATTERN, DECIMAL_FORMAT_SYMBOLS));
-  private static final ThreadLocal<DecimalFormat> THREAD_LOCAL_DOUBLE_FORMAT =
-      ThreadLocal.withInitial(() -> new DecimalFormat(DOUBLE_PATTERN, DECIMAL_FORMAT_SYMBOLS));
 
   /**
    * Extracts the expressions from a selection query, expands {@code 'SELECT *'} to all physical columns if applies.
@@ -152,7 +137,7 @@ public class SelectionOperatorUtils {
       // NOTE: The data schema might be generated from DataTableBuilder.buildEmptyDataTable(), where for 'SELECT *' it
       //       contains a single column "*". In such case, return as is to build the empty selection result.
       if (numColumns == 1 && columnNames[0].equals("*")) {
-        return Collections.singletonList("*");
+        return new ArrayList<>(Collections.singletonList("*"));
       }
 
       // Directly return all columns for selection-only queries
@@ -214,8 +199,11 @@ public class SelectionOperatorUtils {
   public static void mergeWithoutOrdering(Collection<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
       int selectionSize) {
     Iterator<Object[]> iterator = rowsToMerge.iterator();
+    int numMergedRows = 0;
     while (mergedRows.size() < selectionSize && iterator.hasNext()) {
+      LoopUtils.checkMergePhaseInterruption(numMergedRows);
       mergedRows.add(iterator.next());
+      numMergedRows++;
     }
   }
 
@@ -229,8 +217,11 @@ public class SelectionOperatorUtils {
    */
   public static void mergeWithOrdering(PriorityQueue<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
       int maxNumRows) {
+    int numMergedRows = 0;
     for (Object[] row : rowsToMerge) {
+      LoopUtils.checkMergePhaseInterruption(numMergedRows);
       addToPriorityQueue(row, mergedRows, maxNumRows);
+      numMergedRows++;
     }
   }
 
@@ -246,15 +237,38 @@ public class SelectionOperatorUtils {
    *
    * @param rows {@link Collection} of selection rows.
    * @param dataSchema data schema.
+   * @param nullHandlingEnabled whether null handling is enabled.
    * @return data table.
-   * @throws Exception
+   * @throws IOException
    */
-  public static DataTable getDataTableFromRows(Collection<Object[]> rows, DataSchema dataSchema)
-      throws Exception {
+  public static DataTable getDataTableFromRows(Collection<Object[]> rows, DataSchema dataSchema,
+      boolean nullHandlingEnabled)
+      throws IOException {
     ColumnDataType[] storedColumnDataTypes = dataSchema.getStoredColumnDataTypes();
     int numColumns = storedColumnDataTypes.length;
 
-    DataTableBuilder dataTableBuilder = new DataTableBuilder(dataSchema);
+    DataTableBuilder dataTableBuilder = DataTableBuilderFactory.getDataTableBuilder(dataSchema);
+    RoaringBitmap[] nullBitmaps = null;
+    if (nullHandlingEnabled) {
+      nullBitmaps = new RoaringBitmap[numColumns];
+      Object[] nullPlaceholders = new Object[numColumns];
+      for (int colId = 0; colId < numColumns; colId++) {
+        nullBitmaps[colId] = new RoaringBitmap();
+        nullPlaceholders[colId] = storedColumnDataTypes[colId].getNullPlaceholder();
+      }
+      int rowId = 0;
+      for (Object[] row : rows) {
+        for (int i = 0; i < numColumns; i++) {
+          Object columnValue = row[i];
+          if (columnValue == null) {
+            row[i] = nullPlaceholders[i];
+            nullBitmaps[i].add(rowId);
+          }
+        }
+        rowId++;
+      }
+    }
+
     for (Object[] row : rows) {
       dataTableBuilder.startRow();
       for (int i = 0; i < numColumns; i++) {
@@ -272,6 +286,9 @@ public class SelectionOperatorUtils {
             break;
           case DOUBLE:
             dataTableBuilder.setColumn(i, ((Number) columnValue).doubleValue());
+            break;
+          case BIG_DECIMAL:
+            dataTableBuilder.setColumn(i, (BigDecimal) columnValue);
             break;
           case STRING:
             dataTableBuilder.setColumn(i, ((String) columnValue));
@@ -328,14 +345,19 @@ public class SelectionOperatorUtils {
             break;
 
           default:
-            throw new IllegalStateException(String
-                .format("Unsupported data type: %s for column: %s", storedColumnDataTypes[i],
+            throw new IllegalStateException(
+                String.format("Unsupported data type: %s for column: %s", storedColumnDataTypes[i],
                     dataSchema.getColumnName(i)));
         }
       }
       dataTableBuilder.finishRow();
     }
 
+    if (nullHandlingEnabled) {
+      for (int colId = 0; colId < numColumns; colId++) {
+        dataTableBuilder.setNullRowIds(nullBitmaps[colId]);
+      }
+    }
     return dataTableBuilder.build();
   }
 
@@ -367,6 +389,9 @@ public class SelectionOperatorUtils {
         case DOUBLE:
           row[i] = dataTable.getDouble(rowId, i);
           break;
+        case BIG_DECIMAL:
+          row[i] = dataTable.getBigDecimal(rowId, i);
+          break;
         case STRING:
           row[i] = dataTable.getString(rowId, i);
           break;
@@ -392,8 +417,8 @@ public class SelectionOperatorUtils {
           break;
 
         default:
-          throw new IllegalStateException(String
-              .format("Unsupported data type: %s for column: %s", storedColumnDataTypes[i],
+          throw new IllegalStateException(
+              String.format("Unsupported data type: %s for column: %s", storedColumnDataTypes[i],
                   dataSchema.getColumnName(i)));
       }
     }
@@ -402,59 +427,58 @@ public class SelectionOperatorUtils {
   }
 
   /**
+   * Extract a selection row from {@link DataTable} with potential null values. (Broker side)
+   *
+   * @param dataTable data table.
+   * @param rowId row id.
+   * @return selection row.
+   */
+  public static Object[] extractRowFromDataTableWithNullHandling(DataTable dataTable, int rowId,
+      RoaringBitmap[] nullBitmaps) {
+    Object[] row = extractRowFromDataTable(dataTable, rowId);
+    for (int colId = 0; colId < nullBitmaps.length; colId++) {
+      if (nullBitmaps[colId] != null && nullBitmaps[colId].contains(rowId)) {
+        row[colId] = null;
+      }
+    }
+    return row;
+  }
+
+  /**
    * Reduces a collection of {@link DataTable}s to selection rows for selection queries without <code>ORDER BY</code>.
    * (Broker side)
    */
-  public static List<Object[]> reduceWithoutOrdering(Collection<DataTable> dataTables, int limit) {
+  public static List<Object[]> reduceWithoutOrdering(Collection<DataTable> dataTables, int limit,
+      boolean nullHandlingEnabled) {
     List<Object[]> rows = new ArrayList<>(Math.min(limit, SelectionOperatorUtils.MAX_ROW_HOLDER_INITIAL_CAPACITY));
     for (DataTable dataTable : dataTables) {
+      int numColumns = dataTable.getDataSchema().size();
       int numRows = dataTable.getNumberOfRows();
-      for (int rowId = 0; rowId < numRows; rowId++) {
-        if (rows.size() < limit) {
-          rows.add(extractRowFromDataTable(dataTable, rowId));
-        } else {
-          return rows;
+      if (nullHandlingEnabled) {
+        RoaringBitmap[] nullBitmaps = new RoaringBitmap[numColumns];
+        for (int coldId = 0; coldId < numColumns; coldId++) {
+          nullBitmaps[coldId] = dataTable.getNullRowIds(coldId);
+        }
+        for (int rowId = 0; rowId < numRows; rowId++) {
+          LoopUtils.checkMergePhaseInterruption(rowId);
+          if (rows.size() < limit) {
+            rows.add(extractRowFromDataTableWithNullHandling(dataTable, rowId, nullBitmaps));
+          } else {
+            break;
+          }
+        }
+      } else {
+        for (int rowId = 0; rowId < numRows; rowId++) {
+          LoopUtils.checkMergePhaseInterruption(rowId);
+          if (rows.size() < limit) {
+            rows.add(extractRowFromDataTable(dataTable, rowId));
+          } else {
+            break;
+          }
         }
       }
     }
     return rows;
-  }
-
-  /**
-   * Render the selection rows to a formatted {@link SelectionResults} object for selection queries without
-   * <code>ORDER BY</code>. (Broker side)
-   * <p>{@link SelectionResults} object will be used to build the broker response.
-   * <p>Should be called after method "reduceWithoutOrdering()".
-   *
-   * @param rows unformatted selection rows.
-   * @param dataSchema data schema.
-   * @param selectionColumns selection columns.
-   * @return {@link SelectionResults} object results.
-   */
-  public static SelectionResults renderSelectionResultsWithoutOrdering(List<Object[]> rows, DataSchema dataSchema,
-      List<String> selectionColumns, boolean preserveType) {
-    int numRows = rows.size();
-    List<Serializable[]> resultRows = new ArrayList<>(numRows);
-    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
-    int numColumns = columnDataTypes.length;
-    if (preserveType) {
-      for (Object[] row : rows) {
-        Serializable[] resultRow = new Serializable[numColumns];
-        for (int i = 0; i < numColumns; i++) {
-          resultRow[i] = columnDataTypes[i].convertAndFormat(row[i]);
-        }
-        resultRows.add(resultRow);
-      }
-    } else {
-      for (Object[] row : rows) {
-        Serializable[] resultRow = new Serializable[numColumns];
-        for (int i = 0; i < numColumns; i++) {
-          resultRow[i] = getFormattedValue(row[i], columnDataTypes[i]);
-        }
-        resultRows.add(resultRow);
-      }
-    }
-    return new SelectionResults(selectionColumns, resultRows);
   }
 
   /**
@@ -499,7 +523,10 @@ public class SelectionOperatorUtils {
       Object[] resultRow = new Object[numColumns];
       for (int i = 0; i < numColumns; i++) {
         int index = (columnNameToIndexMap != null) ? columnNameToIndexMap.get(selectionColumns.get(i)) : i;
-        resultRow[i] = resultColumnDataTypes[i].convertAndFormat(row[index]);
+        Object value = row[index];
+        if (value != null) {
+          resultRow[i] = resultColumnDataTypes[i].convertAndFormat(value);
+        }
       }
       resultRows.add(resultRow);
     }
@@ -534,109 +561,82 @@ public class SelectionOperatorUtils {
   }
 
   /**
-   * Deprecated because this method is only used to construct the PQL response, and PQL is already deprecated.
-   * Formats a value into a {@code String} (single-value column) or {@code String[]} (multi-value column) based on the
-   * data type. (Broker side)
-   * <p>Actual value type can be different with data type passed in, but they must be type compatible.
+   * Helper method to get the type-compatible {@link Comparator} for selection rows. (Inter segment)
+   * <p>Type-compatible comparator allows compatible types to compare with each other.
+   *
+   * @return flexible {@link Comparator} for selection rows.
    */
-  @Deprecated
-  public static Serializable getFormattedValue(Object value, ColumnDataType dataType) {
-    switch (dataType) {
-      // Single-value column
-      case INT:
-        return THREAD_LOCAL_INT_FORMAT.get().format(((Number) value).intValue());
-      case LONG:
-        return THREAD_LOCAL_LONG_FORMAT.get().format(((Number) value).longValue());
-      case FLOAT:
-        return THREAD_LOCAL_FLOAT_FORMAT.get().format(((Number) value).floatValue());
-      case DOUBLE:
-        return THREAD_LOCAL_DOUBLE_FORMAT.get().format(((Number) value).doubleValue());
-      case BOOLEAN:
-        return (Integer) value == 1 ? "true" : "false";
-      case TIMESTAMP:
-        return new Timestamp((Long) value).toString();
-      // NOTE: Return String for BYTES columns for backward-compatibility
-      case BYTES:
-        return ((ByteArray) value).toHexString();
+  public static Comparator<Object[]> getTypeCompatibleComparator(List<OrderByExpressionContext> orderByExpressions,
+      DataSchema dataSchema, boolean isNullHandlingEnabled) {
+    ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
 
-      // Multi-value column
-      case INT_ARRAY:
-        DecimalFormat intFormat = THREAD_LOCAL_INT_FORMAT.get();
-        int[] ints = (int[]) value;
-        int length = ints.length;
-        String[] formattedValue = new String[length];
-        for (int i = 0; i < length; i++) {
-          formattedValue[i] = intFormat.format(ints[i]);
-        }
-        return formattedValue;
-      case LONG_ARRAY:
-        // LONG_ARRAY type covers INT_ARRAY and LONG_ARRAY
-        DecimalFormat longFormat = THREAD_LOCAL_LONG_FORMAT.get();
-        if (value instanceof int[]) {
-          ints = (int[]) value;
-          length = ints.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = longFormat.format(ints[i]);
-          }
-        } else {
-          long[] longs = (long[]) value;
-          length = longs.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = longFormat.format(longs[i]);
-          }
-        }
-        return formattedValue;
-      case FLOAT_ARRAY:
-        DecimalFormat floatFormat = THREAD_LOCAL_FLOAT_FORMAT.get();
-        float[] floats = (float[]) value;
-        length = floats.length;
-        formattedValue = new String[length];
-        for (int i = 0; i < length; i++) {
-          formattedValue[i] = floatFormat.format(floats[i]);
-        }
-        return formattedValue;
-      case DOUBLE_ARRAY:
-        // DOUBLE_ARRAY type covers INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY and DOUBLE_ARRAY
-        DecimalFormat doubleFormat = THREAD_LOCAL_DOUBLE_FORMAT.get();
-        if (value instanceof int[]) {
-          ints = (int[]) value;
-          length = ints.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = doubleFormat.format((double) ints[i]);
-          }
-          return formattedValue;
-        } else if (value instanceof long[]) {
-          long[] longs = (long[]) value;
-          length = longs.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = doubleFormat.format((double) longs[i]);
-          }
-          return formattedValue;
-        } else if (value instanceof float[]) {
-          floats = (float[]) value;
-          length = floats.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = doubleFormat.format(floats[i]);
-          }
-          return formattedValue;
-        } else {
-          double[] doubles = (double[]) value;
-          length = doubles.length;
-          formattedValue = new String[length];
-          for (int i = 0; i < length; i++) {
-            formattedValue[i] = doubleFormat.format(doubles[i]);
-          }
-          return formattedValue;
-        }
+    // Compare all single-value columns
+    int numOrderByExpressions = orderByExpressions.size();
+    List<Integer> valueIndexList = new ArrayList<>(numOrderByExpressions);
+    for (int i = 0; i < numOrderByExpressions; i++) {
+      if (!columnDataTypes[i].isArray()) {
+        valueIndexList.add(i);
+      }
+    }
 
-      default:
-        // For STRING and STRING_ARRAY, no need to format
-        return (Serializable) value;
+    int numValuesToCompare = valueIndexList.size();
+    int[] valueIndices = new int[numValuesToCompare];
+    boolean[] useDoubleComparison = new boolean[numValuesToCompare];
+    // Use multiplier -1 or 1 to control ascending/descending order
+    int[] multipliers = new int[numValuesToCompare];
+    for (int i = 0; i < numValuesToCompare; i++) {
+      int valueIndex = valueIndexList.get(i);
+      valueIndices[i] = valueIndex;
+      if (columnDataTypes[valueIndex].isNumber()) {
+        useDoubleComparison[i] = true;
+      }
+      multipliers[i] = orderByExpressions.get(valueIndex).isAsc() ? -1 : 1;
+    }
+
+    if (isNullHandlingEnabled) {
+      return (o1, o2) -> {
+        for (int i = 0; i < numValuesToCompare; i++) {
+          int index = valueIndices[i];
+          Object v1 = o1[index];
+          Object v2 = o2[index];
+          if (v1 == null) {
+            // The default null ordering is: 'NULLS LAST'.
+            return v2 == null ? 0 : -multipliers[i];
+          } else if (v2 == null) {
+            return multipliers[i];
+          }
+          int result;
+          if (useDoubleComparison[i]) {
+            result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
+          } else {
+            //noinspection unchecked
+            result = ((Comparable) v1).compareTo(v2);
+          }
+          if (result != 0) {
+            return result * multipliers[i];
+          }
+        }
+        return 0;
+      };
+    } else {
+      return (o1, o2) -> {
+        for (int i = 0; i < numValuesToCompare; i++) {
+          int index = valueIndices[i];
+          Object v1 = o1[index];
+          Object v2 = o2[index];
+          int result;
+          if (useDoubleComparison[i]) {
+            result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
+          } else {
+            //noinspection unchecked
+            result = ((Comparable) v1).compareTo(v2);
+          }
+          if (result != 0) {
+            return result * multipliers[i];
+          }
+        }
+        return 0;
+      };
     }
   }
 

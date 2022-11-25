@@ -21,15 +21,21 @@ package org.apache.pinot.controller.api.resources;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiKeyAuthDefinition;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import io.swagger.annotations.ApiResponse;
 import io.swagger.annotations.ApiResponses;
+import io.swagger.annotations.Authorization;
+import io.swagger.annotations.SecurityDefinition;
+import io.swagger.annotations.SwaggerDefinition;
 import java.util.List;
 import java.util.Map;
 import javax.inject.Inject;
+import javax.ws.rs.ClientErrorException;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.PUT;
@@ -37,6 +43,7 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.helix.model.InstanceConfig;
@@ -52,8 +59,12 @@ import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
-@Api(tags = Constants.INSTANCE_TAG)
+
+@Api(tags = Constants.INSTANCE_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
+    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
 @Path("/")
 public class PinotInstanceRestletResource {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotInstanceRestletResource.class);
@@ -111,6 +122,8 @@ public class PinotInstanceRestletResource {
     response.set("pools", JsonUtils.objectToJsonNode(instanceConfig.getRecord().getMapField(InstanceUtils.POOL_KEY)));
     response.put("grpcPort", getGrpcPort(instanceConfig));
     response.put("adminPort", getAdminPort(instanceConfig));
+    response.put("queryServicePort", getQueryServicePort(instanceConfig));
+    response.put("queryMailboxPort", getQueryMailboxPort(instanceConfig));
     String queriesDisabled = instanceConfig.getRecord().getSimpleField(CommonConstants.Helix.QUERIES_DISABLED);
     if ("true".equalsIgnoreCase(queriesDisabled)) {
       response.put(CommonConstants.Helix.QUERIES_DISABLED, "true");
@@ -143,6 +156,32 @@ public class PinotInstanceRestletResource {
     return Instance.NOT_SET_ADMIN_PORT_VALUE;
   }
 
+  private int getQueryServicePort(InstanceConfig instanceConfig) {
+    String queryServicePortStr = instanceConfig.getRecord().getSimpleField(
+        CommonConstants.Helix.Instance.MULTI_STAGE_QUERY_ENGINE_SERVICE_PORT_KEY);
+    if (queryServicePortStr != null) {
+      try {
+        return Integer.parseInt(queryServicePortStr);
+      } catch (Exception e) {
+        LOGGER.warn("Illegal service port: {} for instance: {}", queryServicePortStr, instanceConfig.getInstanceName());
+      }
+    }
+    return Instance.NOT_SET_GRPC_PORT_VALUE;
+  }
+
+  private int getQueryMailboxPort(InstanceConfig instanceConfig) {
+    String queryMailboxPortStr = instanceConfig.getRecord().getSimpleField(
+        CommonConstants.Helix.Instance.MULTI_STAGE_QUERY_ENGINE_MAILBOX_PORT_KEY);
+    if (queryMailboxPortStr != null) {
+      try {
+        return Integer.parseInt(queryMailboxPortStr);
+      } catch (Exception e) {
+        LOGGER.warn("Illegal mailbox port: {} for instance: {}", queryMailboxPortStr, instanceConfig.getInstanceName());
+      }
+    }
+    return Instance.NOT_SET_GRPC_PORT_VALUE;
+  }
+
   private Map<String, String> getSystemResourceInfo(InstanceConfig instanceConfig) {
     return instanceConfig.getRecord().getMapField(CommonConstants.Helix.Instance.SYSTEM_RESOURCE_INFO_KEY);
   }
@@ -159,12 +198,21 @@ public class PinotInstanceRestletResource {
       @ApiResponse(code = 409, message = "Instance already exists"),
       @ApiResponse(code = 500, message = "Internal error")
   })
-  public SuccessResponse addInstance(Instance instance) {
-    LOGGER.info("Instance creation request received for instance: {}", InstanceUtils.getHelixInstanceId(instance));
-    if (!_pinotHelixResourceManager.addInstance(instance).isSuccessful()) {
-      throw new ControllerApplicationException(LOGGER, "Instance already exists", Response.Status.CONFLICT);
+  public SuccessResponse addInstance(
+      @ApiParam("Whether to update broker resource for broker instance") @QueryParam("updateBrokerResource")
+      @DefaultValue("false") boolean updateBrokerResource, Instance instance) {
+    String instanceId = InstanceUtils.getHelixInstanceId(instance);
+    LOGGER.info("Instance creation request received for instance: {}, updateBrokerResource: {}", instanceId,
+        updateBrokerResource);
+    try {
+      PinotResourceManagerResponse response = _pinotHelixResourceManager.addInstance(instance, updateBrokerResource);
+      return new SuccessResponse(response.getMessage());
+    } catch (ClientErrorException e) {
+      throw new ControllerApplicationException(LOGGER, e.getMessage(), e.getResponse().getStatus());
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to create instance: " + instanceId,
+          Response.Status.INTERNAL_SERVER_ERROR, e);
     }
-    return new SuccessResponse("Instance successfully created");
   }
 
   @POST
@@ -230,17 +278,21 @@ public class PinotInstanceRestletResource {
   public SuccessResponse dropInstance(
       @ApiParam(value = "Instance name", required = true, example = "Server_a.b.com_20000 | Broker_my.broker.com_30000")
       @PathParam("instanceName") String instanceName) {
-    if (!_pinotHelixResourceManager.instanceExists(instanceName)) {
-      throw new ControllerApplicationException(LOGGER, "Instance " + instanceName + " not found",
-          Response.Status.NOT_FOUND);
-    }
-
+    boolean instanceExists = _pinotHelixResourceManager.instanceExists(instanceName);
+    // NOTE: Even if instance config does not exist, still try to delete remaining instance ZK nodes in case some nodes
+    //       are created again due to race condition (state transition messages added after instance is dropped).
     PinotResourceManagerResponse response = _pinotHelixResourceManager.dropInstance(instanceName);
-    if (!response.isSuccessful()) {
+    if (response.isSuccessful()) {
+      if (instanceExists) {
+        return new SuccessResponse("Successfully dropped instance");
+      } else {
+        throw new ControllerApplicationException(LOGGER, "Instance " + instanceName + " not found",
+            Response.Status.NOT_FOUND);
+      }
+    } else {
       throw new ControllerApplicationException(LOGGER,
           "Failed to drop instance " + instanceName + " - " + response.getMessage(), Response.Status.CONFLICT);
     }
-    return new SuccessResponse("Successfully dropped instance");
   }
 
   @PUT
@@ -256,14 +308,21 @@ public class PinotInstanceRestletResource {
   })
   public SuccessResponse updateInstance(
       @ApiParam(value = "Instance name", required = true, example = "Server_a.b.com_20000 | Broker_my.broker.com_30000")
-      @PathParam("instanceName") String instanceName, Instance instance) {
-    LOGGER.info("Instance update request received for instance: {}", instanceName);
-    PinotResourceManagerResponse response = _pinotHelixResourceManager.updateInstance(instanceName, instance);
-    if (!response.isSuccessful()) {
-      throw new ControllerApplicationException(LOGGER, "Failure to update instance. Reason: " + response.getMessage(),
-          Response.Status.INTERNAL_SERVER_ERROR);
+      @PathParam("instanceName") String instanceName,
+      @ApiParam("Whether to update broker resource for broker instance") @QueryParam("updateBrokerResource")
+      @DefaultValue("false") boolean updateBrokerResource, Instance instance) {
+    LOGGER.info("Instance update request received for instance: {}, updateBrokerResource: {}", instanceName,
+        updateBrokerResource);
+    try {
+      PinotResourceManagerResponse response =
+          _pinotHelixResourceManager.updateInstance(instanceName, instance, updateBrokerResource);
+      return new SuccessResponse(response.getMessage());
+    } catch (ClientErrorException e) {
+      throw new ControllerApplicationException(LOGGER, e.getMessage(), e.getResponse().getStatus());
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to update instance: " + instanceName,
+          Response.Status.INTERNAL_SERVER_ERROR, e);
     }
-    return new SuccessResponse("Instance successfully updated");
   }
 
   @PUT
@@ -275,22 +334,60 @@ public class PinotInstanceRestletResource {
       notes = "Update the tags of the specified instance")
   @ApiResponses(value = {
       @ApiResponse(code = 200, message = "Success"),
+      @ApiResponse(code = 400, message = "Bad Request"),
+      @ApiResponse(code = 404, message = "Instance not found"),
       @ApiResponse(code = 500, message = "Internal error")
   })
   public SuccessResponse updateInstanceTags(
       @ApiParam(value = "Instance name", required = true, example = "Server_a.b.com_20000 | Broker_my.broker.com_30000")
       @PathParam("instanceName") String instanceName,
-      @ApiParam(value = "Comma separated tags list", required = true) @QueryParam("tags") String tags) {
-    LOGGER.info("Instance update request received for instance: {} and tags: {}", instanceName, tags);
+      @ApiParam(value = "Comma separated tags list", required = true) @QueryParam("tags") String tags,
+      @ApiParam("Whether to update broker resource for broker instance") @QueryParam("updateBrokerResource")
+      @DefaultValue("false") boolean updateBrokerResource) {
+    LOGGER.info("Instance update request received for instance: {}, tags: {}, updateBrokerResource: {}", instanceName,
+        tags, updateBrokerResource);
     if (tags == null) {
       throw new ControllerApplicationException(LOGGER, "Must provide tags to update", Response.Status.BAD_REQUEST);
     }
-    PinotResourceManagerResponse response = _pinotHelixResourceManager.updateInstanceTags(instanceName, tags);
-    if (!response.isSuccessful()) {
+    try {
+      PinotResourceManagerResponse response =
+          _pinotHelixResourceManager.updateInstanceTags(instanceName, tags, updateBrokerResource);
+      return new SuccessResponse(response.getMessage());
+    } catch (ClientErrorException e) {
+      throw new ControllerApplicationException(LOGGER, e.getMessage(), e.getResponse().getStatus());
+    } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER,
-          "Failure to update instance: " + instanceName + " with tags: " + tags + ". Reason: " + response.getMessage(),
-          Response.Status.INTERNAL_SERVER_ERROR);
+          String.format("Failed to update instance: %s with tags: %s", instanceName, tags),
+          Response.Status.INTERNAL_SERVER_ERROR, e);
     }
-    return new SuccessResponse("Successfully updated tags for instance: " + instanceName + " tags: " + tags);
+  }
+
+  @POST
+  @Path("/instances/{instanceName}/updateBrokerResource")
+  @Authenticate(AccessType.UPDATE)
+  @Produces(MediaType.APPLICATION_JSON)
+  @ApiOperation(value = "Update the tables served by the specified broker instance in the broker resource", notes =
+      "Broker resource should be updated when a new broker instance is added, or the tags for an existing broker are "
+          + "changed. Updating broker resource requires reading all the table configs, which can be costly for large "
+          + "cluster. Consider updating broker resource for each table individually.")
+  @ApiResponses(value = {
+      @ApiResponse(code = 200, message = "Success"),
+      @ApiResponse(code = 400, message = "Bad Request"),
+      @ApiResponse(code = 404, message = "Instance not found"),
+      @ApiResponse(code = 500, message = "Internal error")
+  })
+  public SuccessResponse updateBrokerResource(
+      @ApiParam(value = "Instance name", required = true, example = "Broker_my.broker.com_30000")
+      @PathParam("instanceName") String instanceName) {
+    LOGGER.info("Update broker resource request received for instance: {}", instanceName);
+    try {
+      PinotResourceManagerResponse response = _pinotHelixResourceManager.updateBrokerResource(instanceName);
+      return new SuccessResponse(response.getMessage());
+    } catch (ClientErrorException e) {
+      throw new ControllerApplicationException(LOGGER, e.getMessage(), e.getResponse().getStatus());
+    } catch (Exception e) {
+      throw new ControllerApplicationException(LOGGER, "Failed to update broker resource for instance: " + instanceName,
+          Response.Status.INTERNAL_SERVER_ERROR, e);
+    }
   }
 }

@@ -26,27 +26,15 @@ import org.apache.pinot.common.request.context.ExpressionContext;
 /**
  * Predicate for NOT_IN.
  */
-public class NotInPredicate implements Predicate {
-  private final ExpressionContext _lhs;
-  private final List<String> _values;
+public class NotInPredicate extends BaseInPredicate {
 
   public NotInPredicate(ExpressionContext lhs, List<String> values) {
-    _lhs = lhs;
-    _values = values;
+    super(lhs, values);
   }
 
   @Override
   public Type getType() {
     return Type.NOT_IN;
-  }
-
-  @Override
-  public ExpressionContext getLhs() {
-    return _lhs;
-  }
-
-  public List<String> getValues() {
-    return _values;
   }
 
   @Override

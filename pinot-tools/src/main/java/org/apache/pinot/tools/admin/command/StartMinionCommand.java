@@ -68,6 +68,30 @@ public class StartMinionCommand extends AbstractBaseAdminCommand implements Comm
     return _help;
   }
 
+  public String getMinionHost() {
+    return _minionHost;
+  }
+
+  public int getMinionPort() {
+    return _minionPort;
+  }
+
+  public String getZkAddress() {
+    return _zkAddress;
+  }
+
+  public String getClusterName() {
+    return _clusterName;
+  }
+
+  public String getConfigFileName() {
+    return _configFileName;
+  }
+
+  public Map<String, Object> getConfigOverrides() {
+    return _configOverrides;
+  }
+
   @Override
   public String getName() {
     return "StartMinion";
@@ -100,18 +124,19 @@ public class StartMinionCommand extends AbstractBaseAdminCommand implements Comm
       StartServiceManagerCommand startServiceManagerCommand =
           new StartServiceManagerCommand().setZkAddress(_zkAddress).setClusterName(_clusterName).setPort(-1)
               .setBootstrapServices(new String[0]).addBootstrapService(ServiceRole.MINION, minionConf);
-      startServiceManagerCommand.execute();
-      String pidFile = ".pinotAdminMinion-" + System.currentTimeMillis() + ".pid";
-      savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
-      return true;
+      if (startServiceManagerCommand.execute()) {
+        String pidFile = ".pinotAdminMinion-" + System.currentTimeMillis() + ".pid";
+        savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
+        return true;
+      }
     } catch (Exception e) {
       LOGGER.error("Caught exception while starting minion, exiting", e);
-      System.exit(-1);
-      return false;
     }
+    System.exit(-1);
+    return false;
   }
 
-  private Map<String, Object> getMinionConf()
+  protected Map<String, Object> getMinionConf()
       throws ConfigurationException, SocketException, UnknownHostException {
     Map<String, Object> properties = new HashMap<>();
     if (_configFileName != null) {

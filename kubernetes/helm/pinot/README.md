@@ -273,8 +273,8 @@ helm install --namespace "pinot-quickstart"  --name kafka incubator/kafka --set 
 #### Create Kafka topic
 
 ```bash
-kubectl -n pinot-quickstart exec kafka-0 -- kafka-topics --zookeeper kafka-zookeeper:2181 --topic flights-realtime --create --partitions 1 --replication-factor 1
-kubectl -n pinot-quickstart exec kafka-0 -- kafka-topics --zookeeper kafka-zookeeper:2181 --topic flights-realtime-avro --create --partitions 1 --replication-factor 1
+kubectl -n pinot-quickstart exec kafka-0 -- kafka-topics.sh --bootstrap-server kafka-0:9092 --topic flights-realtime --create --partitions 1 --replication-factor 1
+kubectl -n pinot-quickstart exec kafka-0 -- kafka-topics.sh --bootstrap-server kafka-0:9092 --topic flights-realtime-avro --create --partitions 1 --replication-factor 1
 ```
 
 #### Load data into Kafka and create Pinot schema/table
@@ -398,6 +398,7 @@ following configurable parameters:
 | `zookeeper.resources`                          | Zookeeper resource requests and limits                                                                                                                                     | `{}`                                                               |
 | `zookeeper.env`                                | Environmental variables provided to Zookeeper Zookeeper                                                                                                                    | `{ZK_HEAP_SIZE: "256M"}`                                           |
 | `zookeeper.storage`                            | Zookeeper Persistent volume size                                                                                                                                           | `2Gi`                                                              |
+| `zookeeper.image.tag`                          | Zookeeper Image Version
 | `zookeeper.image.PullPolicy`                   | Zookeeper Container pull policy                                                                                                                                            | `IfNotPresent`                                                     |
 | `zookeeper.url`                                | URL of Zookeeper Cluster (unneeded if installing Zookeeper Chart)                                                                                                          | `""`                                                               |
 | `zookeeper.port`                               | Port of Zookeeper Cluster                                                                                                                                                  | `2181`                                                             |

@@ -94,6 +94,10 @@ public interface SegmentMetadata {
 
   Map<String, String> getCustomMap();
 
+  String getStartOffset();
+
+  String getEndOffset();
+
   default Set<String> getAllColumns() {
     return getSchema().getColumnNames();
   }
@@ -115,4 +119,8 @@ public interface SegmentMetadata {
    * @return json representation of segment metadata.
    */
   JsonNode toJson(@Nullable Set<String> columnFilter);
+
+  default boolean isMutableSegment() {
+    return false;
+  }
 }

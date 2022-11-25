@@ -18,19 +18,21 @@
  */
 package org.apache.pinot.connector.spark.connector
 
-import java.util.{List => JList, Map => JMap}
-
 import org.apache.helix.model.InstanceConfig
-import org.apache.pinot.common.metrics.{BrokerMetrics, PinotMetricUtils}
+import org.apache.pinot.common.datatable.DataTable
+import org.apache.pinot.common.metrics.BrokerMetrics
 import org.apache.pinot.common.request.BrokerRequest
-import org.apache.pinot.common.utils.DataTable
 import org.apache.pinot.connector.spark.datasource.PinotDataSourceReadOptions
 import org.apache.pinot.connector.spark.exceptions.PinotException
 import org.apache.pinot.connector.spark.utils.Logging
+import org.apache.pinot.core.transport.server.routing.stats.ServerRoutingStatsManager
 import org.apache.pinot.core.transport.{AsyncQueryResponse, QueryRouter, ServerInstance}
 import org.apache.pinot.spi.config.table.TableType
+import org.apache.pinot.spi.env.PinotConfiguration
+import org.apache.pinot.spi.metrics.PinotMetricUtils
 import org.apache.pinot.sql.parsers.CalciteSqlCompiler
 
+import java.util.{List => JList, Map => JMap}
 import scala.collection.JavaConverters._
 
 /**
@@ -42,11 +44,12 @@ private[pinot] class PinotServerDataFetcher(
     pinotSplit: PinotSplit,
     dataSourceOptions: PinotDataSourceReadOptions)
   extends Logging {
-  private val sqlCompiler = new CalciteSqlCompiler()
   private val brokerId = "apache_spark"
   private val metricsRegistry = PinotMetricUtils.getPinotMetricsRegistry
   private val brokerMetrics = new BrokerMetrics(metricsRegistry)
-  private val queryRouter = new QueryRouter(brokerId, brokerMetrics)
+  private val pinotConfig = new PinotConfiguration()
+  private val serverRoutingStatsManager = new ServerRoutingStatsManager(pinotConfig)
+  private val queryRouter = new QueryRouter(brokerId, brokerMetrics, serverRoutingStatsManager)
   // TODO add support for TLS-secured server
 
   def fetchData(): List[DataTable] = {
@@ -56,15 +59,15 @@ private[pinot] class PinotServerDataFetcher(
     val pinotServerAsyncQueryResponse = pinotSplit.serverAndSegments.serverType match {
       case TableType.REALTIME =>
         val realtimeBrokerRequest =
-          sqlCompiler.compileToBrokerRequest(pinotSplit.generatedSQLs.realtimeSelectQuery)
+          CalciteSqlCompiler.compileToBrokerRequest(pinotSplit.generatedSQLs.realtimeSelectQuery)
         submitRequestToPinotServer(null, null, realtimeBrokerRequest, routingTableForRequest)
       case TableType.OFFLINE =>
         val offlineBrokerRequest =
-          sqlCompiler.compileToBrokerRequest(pinotSplit.generatedSQLs.offlineSelectQuery)
+          CalciteSqlCompiler.compileToBrokerRequest(pinotSplit.generatedSQLs.offlineSelectQuery)
         submitRequestToPinotServer(offlineBrokerRequest, routingTableForRequest, null, null)
     }
 
-    val pinotServerResponse = pinotServerAsyncQueryResponse.getResponse.values().asScala.toList
+    val pinotServerResponse = pinotServerAsyncQueryResponse.getFinalResponses.values().asScala.toList
     logInfo(s"Pinot server total response time in millis: ${System.nanoTime() - requestStartTime}")
 
     closePinotServerConnection()
@@ -95,7 +98,7 @@ private[pinot] class PinotServerDataFetcher(
     val instanceConfig = new InstanceConfig(nullZkId)
     instanceConfig.setHostName(pinotSplit.serverAndSegments.serverHost)
     instanceConfig.setPort(pinotSplit.serverAndSegments.serverPort)
-    // TODO: support grpc and netty-sec
+    // TODO: support netty-sec
     val serverInstance = new ServerInstance(instanceConfig)
     Map(
       serverInstance -> pinotSplit.serverAndSegments.segments.asJava

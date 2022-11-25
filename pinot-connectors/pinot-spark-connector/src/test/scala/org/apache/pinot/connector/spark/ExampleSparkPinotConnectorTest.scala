@@ -39,8 +39,11 @@ object ExampleSparkPinotConnectorTest extends Logging {
     readOffline()
     readHybrid()
     readHybridWithSpecificSchema()
-    readOfflineWithFilters()
     readHybridWithFilters()
+    readHybridViaGrpc()
+    readRealtimeViaGrpc()
+    readRealtimeWithFilterViaGrpc()
+    readHybridWithFiltersViaGrpc()
     readRealtimeWithSelectionColumns()
     applyJustSomeFilters()
   }
@@ -136,6 +139,60 @@ object ExampleSparkPinotConnectorTest extends Logging {
 
     data.show()
   }
+
+  def readHybridViaGrpc()(implicit spark: SparkSession): Unit = {
+    log.info("## Reading `airlineStats` table... ##")
+    val data = spark.read
+      .format("pinot")
+      .option("table", "airlineStats")
+      .option("tableType", "hybrid")
+      .option("useGrpcServer", "true")
+      .load()
+
+    data.show()
+  }
+
+  def readRealtimeViaGrpc()(implicit spark: SparkSession): Unit = {
+    log.info("## Reading `airlineStats_REALTIME` table... ##")
+    val data = spark.read
+      .format("pinot")
+      .option("table", "airlineStats")
+      .option("tableType", "realtime")
+      .option("useGrpcServer", "true")
+      .load()
+
+    data.show()
+  }
+
+  def readRealtimeWithFilterViaGrpc()(implicit spark: SparkSession): Unit = {
+    import spark.implicits._
+    log.info("## Reading `airlineStats_REALTIME` table... ##")
+    val data = spark.read
+      .format("pinot")
+      .option("table", "airlineStats")
+      .option("tableType", "realtime")
+      .option("useGrpcServer", "true")
+      .load()
+      .filter($"DestWac" === 5)
+      .select($"FlightNum", $"Origin", $"DestStateName")
+
+    data.show()
+  }
+
+  def readHybridWithFiltersViaGrpc()(implicit spark: SparkSession): Unit = {
+    import spark.implicits._
+    log.info("## Reading `airlineStats_OFFLINE` table with filter push down... ##")
+    val data = spark.read
+      .format("pinot")
+      .option("table", "airlineStats")
+      .option("tableType", "hybrid")
+      .option("useGrpcServer", "true")
+      .load()
+      .filter($"DestStateName" === "Florida")
+
+    data.show()
+  }
+
 
   def applyJustSomeFilters()(implicit spark: SparkSession): Unit = {
     import spark.implicits._

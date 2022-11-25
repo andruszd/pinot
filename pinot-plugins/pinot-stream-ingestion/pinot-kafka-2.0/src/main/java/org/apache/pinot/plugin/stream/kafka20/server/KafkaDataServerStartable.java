@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.plugin.stream.kafka20.server;
 
+import com.google.common.base.Function;
 import java.io.File;
 import java.util.Arrays;
 import java.util.Collection;
@@ -25,17 +26,20 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import javax.annotation.Nullable;
 import kafka.server.KafkaConfig;
-import kafka.server.KafkaServerStartable;
+import kafka.server.KafkaServer;
 import org.I0Itec.zkclient.ZkClient;
 import org.apache.commons.io.FileUtils;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.KafkaAdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.utils.Time;
 import org.apache.pinot.spi.stream.StreamDataServerStartable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Option;
 
 
 public class KafkaDataServerStartable implements StreamDataServerStartable {
@@ -45,7 +49,7 @@ public class KafkaDataServerStartable implements StreamDataServerStartable {
   private static final String LOG_DIRS = "log.dirs";
   private static final String PORT = "port";
 
-  private KafkaServerStartable _serverStartable;
+  private KafkaServer _serverStartable;
   private int _port;
   private String _zkStr;
   private String _logDirPath;
@@ -70,7 +74,7 @@ public class KafkaDataServerStartable implements StreamDataServerStartable {
     logDir.mkdirs();
 
     props.put("zookeeper.session.timeout.ms", "60000");
-    _serverStartable = new KafkaServerStartable(new KafkaConfig(props));
+    _serverStartable = new KafkaServer(new KafkaConfig(props), Time.SYSTEM, Option.empty(), false);
     final Map<String, Object> config = new HashMap<>();
     config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:" + _port);
     config.put(AdminClientConfig.CLIENT_ID_CONFIG, "Kafka2AdminClient-" + UUID.randomUUID().toString());
@@ -86,7 +90,7 @@ public class KafkaDataServerStartable implements StreamDataServerStartable {
   @Override
   public void stop() {
     _serverStartable.shutdown();
-    FileUtils.deleteQuietly(new File(_serverStartable.staticServerConfig().logDirs().apply(0)));
+    FileUtils.deleteQuietly(new File(_serverStartable.config().logDirs().apply(0)));
   }
 
   @Override
@@ -94,10 +98,39 @@ public class KafkaDataServerStartable implements StreamDataServerStartable {
     int partition = (Integer) props.get("partition");
     Collection<NewTopic> topicList = Arrays.asList(new NewTopic(topic, partition, (short) 1));
     _adminClient.createTopics(topicList);
+    waitForCondition(new Function<Void, Boolean>() {
+      @Nullable
+      @Override
+      public Boolean apply(@Nullable Void aVoid) {
+        try {
+          return _adminClient.listTopics().names().get().contains(topic);
+        } catch (Exception e) {
+          LOGGER.warn("Could not fetch Kafka topics", e);
+          return null;
+        }
+      }
+    }, 1000L, 30000, "Kafka topic " + topic + " is not created yet");
   }
 
   @Override
   public int getPort() {
     return _port;
+  }
+
+  private static void waitForCondition(Function<Void, Boolean> condition, long checkIntervalMs, long timeoutMs,
+      @Nullable String errorMessage) {
+    long endTime = System.currentTimeMillis() + timeoutMs;
+    String errorMessageSuffix = errorMessage != null ? ", error message: " + errorMessage : "";
+    while (System.currentTimeMillis() < endTime) {
+      try {
+        if (Boolean.TRUE.equals(condition.apply(null))) {
+          return;
+        }
+        Thread.sleep(checkIntervalMs);
+      } catch (Exception e) {
+        LOGGER.error("Caught exception while checking the condition" + errorMessageSuffix, e);
+      }
+    }
+    LOGGER.error("Failed to meet condition in " + timeoutMs + "ms" + errorMessageSuffix);
   }
 }

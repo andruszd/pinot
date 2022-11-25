@@ -18,8 +18,6 @@
  */
 package org.apache.pinot.spi.config.table.ingestion;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -39,25 +37,40 @@ public class IngestionConfig extends BaseJsonConfig {
   private StreamIngestionConfig _streamIngestionConfig;
 
   @JsonPropertyDescription("Config related to filtering records during ingestion")
-  private final FilterConfig _filterConfig;
+  private FilterConfig _filterConfig;
 
   @JsonPropertyDescription("Configs related to record transformation functions applied during ingestion")
-  private final List<TransformConfig> _transformConfigs;
+  private List<TransformConfig> _transformConfigs;
 
   @JsonPropertyDescription("Config related to handling complex type")
-  private final ComplexTypeConfig _complexTypeConfig;
+  private ComplexTypeConfig _complexTypeConfig;
 
-  @JsonCreator
-  public IngestionConfig(@JsonProperty("batchIngestionConfig") @Nullable BatchIngestionConfig batchIngestionConfig,
-      @JsonProperty("streamIngestionConfig") @Nullable StreamIngestionConfig streamIngestionConfig,
-      @JsonProperty("filterConfig") @Nullable FilterConfig filterConfig,
-      @JsonProperty("transformConfigs") @Nullable List<TransformConfig> transformConfigs,
-      @JsonProperty("complexTypeConfig") @Nullable ComplexTypeConfig complexTypeConfig) {
+  @JsonPropertyDescription("Configs related to record aggregation function applied during ingestion")
+  private List<AggregationConfig> _aggregationConfigs;
+
+  @JsonPropertyDescription("Configs related to skip any row which has error and continue during ingestion")
+  private boolean _continueOnError;
+
+  @JsonPropertyDescription("Configs related to validate time value for each record during ingestion")
+  private boolean _rowTimeValueCheck;
+
+  @JsonPropertyDescription("Configs related to check time value for segment")
+  private boolean _segmentTimeValueCheck = true;
+
+  @Deprecated
+  public IngestionConfig(@Nullable BatchIngestionConfig batchIngestionConfig,
+      @Nullable StreamIngestionConfig streamIngestionConfig, @Nullable FilterConfig filterConfig,
+      @Nullable List<TransformConfig> transformConfigs, @Nullable ComplexTypeConfig complexTypeConfig,
+      @Nullable List<AggregationConfig> aggregationConfigs) {
     _batchIngestionConfig = batchIngestionConfig;
     _streamIngestionConfig = streamIngestionConfig;
     _filterConfig = filterConfig;
     _transformConfigs = transformConfigs;
     _complexTypeConfig = complexTypeConfig;
+    _aggregationConfigs = aggregationConfigs;
+  }
+
+  public IngestionConfig() {
   }
 
   @Nullable
@@ -85,11 +98,56 @@ public class IngestionConfig extends BaseJsonConfig {
     return _complexTypeConfig;
   }
 
+  @Nullable
+  public List<AggregationConfig> getAggregationConfigs() {
+    return _aggregationConfigs;
+  }
+
+  public boolean isContinueOnError() {
+    return _continueOnError;
+  }
+
+  public boolean isRowTimeValueCheck() {
+    return _rowTimeValueCheck;
+  }
+
+  public boolean isSegmentTimeValueCheck() {
+    return _segmentTimeValueCheck;
+  }
+
   public void setBatchIngestionConfig(BatchIngestionConfig batchIngestionConfig) {
     _batchIngestionConfig = batchIngestionConfig;
   }
 
   public void setStreamIngestionConfig(StreamIngestionConfig streamIngestionConfig) {
     _streamIngestionConfig = streamIngestionConfig;
+  }
+
+  public void setFilterConfig(FilterConfig filterConfig) {
+    _filterConfig = filterConfig;
+  }
+
+  public void setTransformConfigs(List<TransformConfig> transformConfigs) {
+    _transformConfigs = transformConfigs;
+  }
+
+  public void setComplexTypeConfig(ComplexTypeConfig complexTypeConfig) {
+    _complexTypeConfig = complexTypeConfig;
+  }
+
+  public void setAggregationConfigs(List<AggregationConfig> aggregationConfigs) {
+    _aggregationConfigs = aggregationConfigs;
+  }
+
+  public void setContinueOnError(boolean continueOnError) {
+    _continueOnError = continueOnError;
+  }
+
+  public void setRowTimeValueCheck(boolean rowTimeValueCheck) {
+    _rowTimeValueCheck = rowTimeValueCheck;
+  }
+
+  public void setSegmentTimeValueCheck(boolean segmentTimeValueCheck) {
+    _segmentTimeValueCheck = segmentTimeValueCheck;
   }
 }

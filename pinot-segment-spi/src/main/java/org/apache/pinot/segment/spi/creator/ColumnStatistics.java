@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.spi.creator;
 
 import java.io.Serializable;
+import java.util.Map;
 import java.util.Set;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
 
@@ -89,14 +90,11 @@ public interface ColumnStatistics extends Serializable {
     return -1;
   }
 
-  /**
-   * @return Returns if any of the values have nulls in the segments.
-   */
-  boolean hasNull();
-
   PartitionFunction getPartitionFunction();
 
   int getNumPartitions();
+
+  Map<String, String> getPartitionFunctionConfig();
 
   Set<Integer> getPartitions();
 }

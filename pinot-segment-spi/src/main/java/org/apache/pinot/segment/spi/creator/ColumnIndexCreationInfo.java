@@ -19,7 +19,9 @@
 package org.apache.pinot.segment.spi.creator;
 
 import java.io.Serializable;
+import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.pinot.segment.spi.Constants;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
@@ -73,10 +75,6 @@ public class ColumnIndexCreationInfo implements Serializable {
     return _columnStatistics.isSorted();
   }
 
-  public boolean hasNulls() {
-    return _columnStatistics.hasNull();
-  }
-
   public int getTotalNumberOfEntries() {
     return _columnStatistics.getTotalNumberOfEntries();
   }
@@ -111,5 +109,10 @@ public class ColumnIndexCreationInfo implements Serializable {
 
   public int getNumPartitions() {
     return _columnStatistics.getNumPartitions();
+  }
+
+  @Nullable
+  public Map<String, String> getPartitionFunctionConfig() {
+    return _columnStatistics.getPartitionFunctionConfig();
   }
 }

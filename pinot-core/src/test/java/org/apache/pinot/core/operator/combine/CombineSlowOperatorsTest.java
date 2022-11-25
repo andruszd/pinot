@@ -19,24 +19,38 @@
 package org.apache.pinot.core.operator.combine;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.core.common.Block;
 import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.core.operator.ExecutionStatistics;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
+import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.segment.spi.datasource.DataSourceMetadata;
 import org.apache.pinot.spi.exception.EarlyTerminationException;
+import org.apache.pinot.spi.exception.QueryCancelledException;
+import org.apache.pinot.util.TestUtils;
+import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
@@ -64,7 +78,7 @@ public class CombineSlowOperatorsTest {
   @Test
   public void testSelectionOnlyCombineOperator() {
     List<Operator> operators = getOperators();
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContextFromSQL("SELECT * FROM testTable");
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT * FROM testTable");
     queryContext.setEndTimeMs(System.currentTimeMillis() + TIMEOUT_MS);
     SelectionOnlyCombineOperator combineOperator =
         new SelectionOnlyCombineOperator(operators, queryContext, _executorService);
@@ -77,20 +91,10 @@ public class CombineSlowOperatorsTest {
   @Test
   public void testAggregationOnlyCombineOperator() {
     List<Operator> operators = getOperators();
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContextFromSQL("SELECT COUNT(*) FROM testTable");
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT COUNT(*) FROM testTable");
     queryContext.setEndTimeMs(System.currentTimeMillis() + TIMEOUT_MS);
-    AggregationOnlyCombineOperator combineOperator =
-        new AggregationOnlyCombineOperator(operators, queryContext, _executorService);
-    testCombineOperator(operators, combineOperator);
-  }
-
-  @Test
-  public void testGroupByCombineOperator() {
-    List<Operator> operators = getOperators();
-    QueryContext queryContext =
-        QueryContextConverterUtils.getQueryContextFromSQL("SELECT COUNT(*) FROM testTable GROUP BY column");
-    queryContext.setEndTimeMs(System.currentTimeMillis() + TIMEOUT_MS);
-    GroupByCombineOperator combineOperator = new GroupByCombineOperator(operators, queryContext, _executorService);
+    AggregationCombineOperator combineOperator =
+        new AggregationCombineOperator(operators, queryContext, _executorService);
     testCombineOperator(operators, combineOperator);
   }
 
@@ -98,11 +102,101 @@ public class CombineSlowOperatorsTest {
   public void testGroupByOrderByCombineOperator() {
     List<Operator> operators = getOperators();
     QueryContext queryContext =
-        QueryContextConverterUtils.getQueryContextFromSQL("SELECT COUNT(*) FROM testTable GROUP BY column");
+        QueryContextConverterUtils.getQueryContext("SELECT COUNT(*) FROM testTable GROUP BY column");
     queryContext.setEndTimeMs(System.currentTimeMillis() + TIMEOUT_MS);
-    GroupByOrderByCombineOperator combineOperator =
-        new GroupByOrderByCombineOperator(operators, queryContext, _executorService);
+    GroupByCombineOperator combineOperator = new GroupByCombineOperator(operators, queryContext, _executorService);
     testCombineOperator(operators, combineOperator);
+  }
+
+  @Test
+  public void testCancelSelectionOnlyCombineOperator() {
+    // Just need to wait for one operator to start running.
+    CountDownLatch ready = new CountDownLatch(1);
+    List<Operator> operators = getOperators(ready, null);
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT * FROM testTable");
+    queryContext.setEndTimeMs(System.currentTimeMillis() + 10000);
+    SelectionOnlyCombineOperator combineOperator =
+        new SelectionOnlyCombineOperator(operators, queryContext, _executorService);
+    testCancelCombineOperator(combineOperator, ready, "Cancelled while merging results blocks");
+  }
+
+  @Test
+  public void testCancelSelectionOrderByCombineOperator() {
+    CountDownLatch ready = new CountDownLatch(1);
+    List<Operator> operators = getOperators(ready, null);
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT * FROM testTable ORDER BY column");
+    queryContext.setEndTimeMs(System.currentTimeMillis() + 10000);
+    SelectionOrderByCombineOperator combineOperator =
+        new SelectionOrderByCombineOperator(operators, queryContext, _executorService);
+    testCancelCombineOperator(combineOperator, ready, "Cancelled while merging results blocks");
+  }
+
+  @Test
+  public void testCancelMinMaxValueBasedSelectionOrderByCombineOperator() {
+    CountDownLatch ready = new CountDownLatch(1);
+    List<Operator> operators = getOperators(ready, () -> {
+      IndexSegment seg = mock(IndexSegment.class);
+      DataSource ds = mock(DataSource.class);
+      DataSourceMetadata dsmd = mock(DataSourceMetadata.class);
+      when(dsmd.getMinValue()).thenReturn(100L);
+      when(dsmd.getMaxValue()).thenReturn(200L);
+      when(seg.getDataSource(anyString())).thenReturn(ds);
+      when(ds.getDataSourceMetadata()).thenReturn(dsmd);
+      return seg;
+    });
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT * FROM testTable ORDER BY column");
+    queryContext.setEndTimeMs(System.currentTimeMillis() + 10000);
+    SelectionOrderByCombineOperator combineOperator =
+        new SelectionOrderByCombineOperator(operators, queryContext, _executorService);
+    testCancelCombineOperator(combineOperator, ready, "Cancelled while merging results blocks");
+  }
+
+  @Test
+  public void testCancelAggregationOnlyCombineOperator() {
+    CountDownLatch ready = new CountDownLatch(1);
+    List<Operator> operators = getOperators(ready, null);
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext("SELECT COUNT(*) FROM testTable");
+    queryContext.setEndTimeMs(System.currentTimeMillis() + 10000);
+    AggregationCombineOperator combineOperator =
+        new AggregationCombineOperator(operators, queryContext, _executorService);
+    testCancelCombineOperator(combineOperator, ready, "Cancelled while merging results blocks");
+  }
+
+  @Test
+  public void testCancelGroupByOrderByCombineOperator() {
+    CountDownLatch ready = new CountDownLatch(1);
+    List<Operator> operators = getOperators(ready, null);
+    QueryContext queryContext =
+        QueryContextConverterUtils.getQueryContext("SELECT COUNT(*) FROM testTable GROUP BY column");
+    queryContext.setEndTimeMs(System.currentTimeMillis() + 10000);
+    GroupByCombineOperator combineOperator = new GroupByCombineOperator(operators, queryContext, _executorService);
+    testCancelCombineOperator(combineOperator, ready, "Cancelled while merging results blocks");
+  }
+
+  private void testCancelCombineOperator(BaseCombineOperator combineOperator, CountDownLatch ready, String errMsg) {
+    AtomicReference<Exception> exp = new AtomicReference<>();
+    ExecutorService combineExecutor = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> future = combineExecutor.submit(() -> {
+        try {
+          return combineOperator.nextBlock();
+        } catch (Exception e) {
+          exp.set(e);
+          throw e;
+        }
+      });
+      ready.await();
+      // At this point, the combineOperator is or will be waiting on future.get() for all sub operators, and the
+      // waiting can be cancelled as below.
+      future.cancel(true);
+    } catch (Exception e) {
+      Assert.fail();
+    } finally {
+      combineExecutor.shutdownNow();
+    }
+    TestUtils.waitForCondition((aVoid) -> exp.get() instanceof QueryCancelledException, 10_000,
+        "Should have been cancelled");
+    assertEquals(exp.get().getMessage(), errMsg);
   }
 
   /**
@@ -110,7 +204,7 @@ public class CombineSlowOperatorsTest {
    *       for each query.
    */
   private void testCombineOperator(List<Operator> operators, BaseOperator combineOperator) {
-    IntermediateResultsBlock intermediateResultsBlock = (IntermediateResultsBlock) combineOperator.nextBlock();
+    BaseResultsBlock intermediateResultsBlock = (BaseResultsBlock) combineOperator.nextBlock();
     List<ProcessingException> processingExceptions = intermediateResultsBlock.getProcessingExceptions();
     assertNotNull(processingExceptions);
     assertEquals(processingExceptions.size(), 1);
@@ -131,20 +225,36 @@ public class CombineSlowOperatorsTest {
   }
 
   private List<Operator> getOperators() {
+    return getOperators(null, null);
+  }
+
+  private List<Operator> getOperators(CountDownLatch ready, Supplier<IndexSegment> segmentSupplier) {
     List<Operator> operators = new ArrayList<>(NUM_OPERATORS);
     for (int i = 0; i < NUM_OPERATORS; i++) {
-      operators.add(new SlowOperator());
+      operators.add(new SlowOperator(ready, segmentSupplier));
     }
     return operators;
   }
 
   private static class SlowOperator extends BaseOperator {
+    private static final String EXPLAIN_NAME = "SLOW";
+
     final AtomicBoolean _operationInProgress = new AtomicBoolean();
     final AtomicBoolean _notInterrupted = new AtomicBoolean();
+    private final CountDownLatch _ready;
+    private final Supplier<IndexSegment> _segmentSupplier;
+
+    public SlowOperator(CountDownLatch ready, Supplier<IndexSegment> segmentSupplier) {
+      _ready = ready;
+      _segmentSupplier = segmentSupplier;
+    }
 
     @Override
     protected Block getNextBlock() {
       _operationInProgress.set(true);
+      if (_ready != null) {
+        _ready.countDown();
+      }
       try {
         Thread.sleep(3_600_000L);
       } catch (InterruptedException e) {
@@ -164,13 +274,26 @@ public class CombineSlowOperatorsTest {
     }
 
     @Override
-    public String getOperatorName() {
-      return "SlowOperator";
+    public String toExplainString() {
+      return EXPLAIN_NAME;
+    }
+
+    @Override
+    public List<Operator> getChildOperators() {
+      return Collections.emptyList();
     }
 
     @Override
     public ExecutionStatistics getExecutionStatistics() {
       return new ExecutionStatistics(0, 0, 0, 0);
+    }
+
+    @Override
+    public IndexSegment getIndexSegment() {
+      if (_segmentSupplier != null) {
+        return _segmentSupplier.get();
+      }
+      return super.getIndexSegment();
     }
   }
 }

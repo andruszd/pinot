@@ -23,6 +23,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import org.apache.pinot.spi.data.DateTimeFieldSpec.TimeFormat;
@@ -42,6 +43,7 @@ public class NormalizedDateSegmentNameGenerator implements SegmentNameGenerator 
   private final boolean _excludeSequenceId;
   private final boolean _appendPushType;
   private final String _segmentNamePostfix;
+  private final boolean _appendUUIDToSegmentName;
 
   // For APPEND tables
   private final SimpleDateFormat _outputSDF;
@@ -53,12 +55,25 @@ public class NormalizedDateSegmentNameGenerator implements SegmentNameGenerator 
   public NormalizedDateSegmentNameGenerator(String tableName, @Nullable String segmentNamePrefix,
       boolean excludeSequenceId, @Nullable String pushType, @Nullable String pushFrequency,
       @Nullable DateTimeFormatSpec dateTimeFormatSpec, @Nullable String segmentNamePostfix) {
+    this(tableName, segmentNamePrefix, excludeSequenceId, pushType, pushFrequency, dateTimeFormatSpec,
+        segmentNamePostfix, false);
+  }
+
+  public NormalizedDateSegmentNameGenerator(String tableName, @Nullable String segmentNamePrefix,
+      boolean excludeSequenceId, @Nullable String pushType, @Nullable String pushFrequency,
+      @Nullable DateTimeFormatSpec dateTimeFormatSpec, @Nullable String segmentNamePostfix,
+      boolean appendUUIDToSegmentName) {
     _segmentNamePrefix = segmentNamePrefix != null ? segmentNamePrefix.trim() : tableName;
-    Preconditions.checkArgument(
-        _segmentNamePrefix != null && isValidSegmentName(_segmentNamePrefix));
+    Preconditions
+        .checkArgument(_segmentNamePrefix != null, "Missing segmentNamePrefix for NormalizedDateSegmentNameGenerator");
+    SegmentNameUtils.validatePartialOrFullSegmentName(_segmentNamePrefix);
     _excludeSequenceId = excludeSequenceId;
     _appendPushType = "APPEND".equalsIgnoreCase(pushType);
-    _segmentNamePostfix = segmentNamePostfix;
+    _segmentNamePostfix = segmentNamePostfix != null ? segmentNamePostfix.trim() : null;
+    _appendUUIDToSegmentName = appendUUIDToSegmentName;
+    if (_segmentNamePostfix != null) {
+      SegmentNameUtils.validatePartialOrFullSegmentName(_segmentNamePostfix);
+    }
 
     // Include time info for APPEND push type
     if (_appendPushType) {
@@ -70,14 +85,16 @@ public class NormalizedDateSegmentNameGenerator implements SegmentNameGenerator 
       }
       _outputSDF.setTimeZone(TimeZone.getTimeZone("UTC"));
 
-      // Parse input time format: 'EPOCH' or 'SIMPLE_DATE_FORMAT' using pattern
-      Preconditions.checkNotNull(dateTimeFormatSpec);
+      // Parse input time format: 'EPOCH'/'TIMESTAMP' or 'SIMPLE_DATE_FORMAT' using pattern
+      Preconditions.checkArgument(dateTimeFormatSpec != null,
+          "Must provide date time format spec for NormalizedDateSegmentNameGenerator");
       TimeFormat timeFormat = dateTimeFormatSpec.getTimeFormat();
-      if (timeFormat == TimeFormat.EPOCH) {
+      if (timeFormat == TimeFormat.EPOCH || timeFormat == TimeFormat.TIMESTAMP) {
         _inputTimeUnit = dateTimeFormatSpec.getColumnUnit();
         _inputSDF = null;
       } else {
-        Preconditions.checkNotNull(dateTimeFormatSpec.getSDFPattern(), "Must provide pattern for SIMPLE_DATE_FORMAT");
+        Preconditions.checkArgument(dateTimeFormatSpec.getSDFPattern() != null,
+            "Must provide pattern for SIMPLE_DATE_FORMAT for NormalizedDateSegmentNameGenerator");
         _inputTimeUnit = null;
         _inputSDF = new SimpleDateFormat(dateTimeFormatSpec.getSDFPattern());
         _inputSDF.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -95,14 +112,13 @@ public class NormalizedDateSegmentNameGenerator implements SegmentNameGenerator 
 
     // Include time value for APPEND push type
     if (_appendPushType) {
-      return JOINER.join(_segmentNamePrefix, getNormalizedDate(Preconditions.checkNotNull(minTimeValue)),
-          getNormalizedDate(Preconditions.checkNotNull(maxTimeValue)), sequenceIdInSegmentName);
+      Preconditions.checkArgument(minTimeValue != null, "Missing minTimeValue for NormalizedDateSegmentNameGenerator");
+      Preconditions.checkArgument(maxTimeValue != null, "Missing maxTimeValue for NormalizedDateSegmentNameGenerator");
+      return JOINER.join(_segmentNamePrefix, getNormalizedDate(minTimeValue), getNormalizedDate(maxTimeValue),
+          _segmentNamePostfix, sequenceIdInSegmentName, _appendUUIDToSegmentName ? UUID.randomUUID() : null);
     } else {
-      if (_segmentNamePostfix != null) {
-        return JOINER.join(_segmentNamePrefix, _segmentNamePostfix, sequenceIdInSegmentName);
-      } else {
-        return JOINER.join(_segmentNamePrefix, sequenceIdInSegmentName);
-      }
+      return JOINER.join(_segmentNamePrefix, _segmentNamePostfix, sequenceIdInSegmentName,
+          _appendUUIDToSegmentName ? UUID.randomUUID() : null);
     }
   }
 
@@ -129,8 +145,11 @@ public class NormalizedDateSegmentNameGenerator implements SegmentNameGenerator 
   @Override
   public String toString() {
     StringBuilder stringBuilder =
-        new StringBuilder("NormalizedDateSegmentNameGenerator: segmentNamePrefix=").append(_segmentNamePrefix)
-            .append(", appendPushType=").append(_appendPushType);
+        new StringBuilder("NormalizedDateSegmentNameGenerator: segmentNamePrefix=").append(_segmentNamePrefix);
+    if (_segmentNamePostfix != null) {
+      stringBuilder.append(", segmentNamePostfix=").append(_segmentNamePostfix);
+    }
+    stringBuilder.append(", appendPushType=").append(_appendPushType);
     if (_excludeSequenceId) {
       stringBuilder.append(", excludeSequenceId=true");
     }

@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
@@ -30,23 +31,33 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.MapDifference;
+import com.google.common.collect.Maps;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.pinot.spi.config.table.JsonIndexConfig;
 import org.apache.pinot.spi.config.table.ingestion.ComplexTypeConfig;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
-import org.apache.pinot.spi.data.DateTimeFormatSpec;
-import org.apache.pinot.spi.data.DateTimeGranularitySpec;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
@@ -61,7 +72,9 @@ public class JsonUtils {
   // For flattening
   public static final String VALUE_KEY = "";
   public static final String KEY_SEPARATOR = ".";
+  public static final String ARRAY_PATH = "[*]";
   public static final String ARRAY_INDEX_KEY = ".$index";
+  public static final int MAX_COMBINATIONS = 100_000;
 
   // For querying
   public static final String WILDCARD = "*";
@@ -71,10 +84,61 @@ public class JsonUtils {
   public static final ObjectReader DEFAULT_READER = DEFAULT_MAPPER.reader();
   public static final ObjectWriter DEFAULT_WRITER = DEFAULT_MAPPER.writer();
   public static final ObjectWriter DEFAULT_PRETTY_WRITER = DEFAULT_MAPPER.writerWithDefaultPrettyPrinter();
+  public static final ObjectReader READER_WITH_BIG_DECIMAL =
+      new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS).reader();
+
+  public static final TypeReference<HashMap<String, Object>> MAP_TYPE_REFERENCE =
+      new TypeReference<HashMap<String, Object>>() {
+      };
 
   public static <T> T stringToObject(String jsonString, Class<T> valueType)
-      throws IOException {
+      throws JsonProcessingException {
     return DEFAULT_READER.forType(valueType).readValue(jsonString);
+  }
+
+  public static <T> Pair<T, Map<String, Object>> inputStreamToObjectAndUnrecognizedProperties(
+      InputStream jsonInputStream, Class<T> valueType)
+      throws IOException {
+    String jsonString = IOUtils.toString(jsonInputStream, StandardCharsets.UTF_8);
+    return stringToObjectAndUnrecognizedProperties(jsonString, valueType);
+  }
+
+  public static <T> Pair<T, Map<String, Object>> stringToObjectAndUnrecognizedProperties(String jsonString,
+      Class<T> valueType)
+      throws IOException {
+    T instance = DEFAULT_READER.forType(valueType).readValue(jsonString);
+    Map<String, Object> inputJsonMap = flatten(DEFAULT_MAPPER.readValue(jsonString, MAP_TYPE_REFERENCE));
+
+    String instanceJson = DEFAULT_MAPPER.writeValueAsString(instance);
+    Map<String, Object> instanceJsonMap = flatten(DEFAULT_MAPPER.readValue(instanceJson, MAP_TYPE_REFERENCE));
+
+    MapDifference<String, Object> difference = Maps.difference(inputJsonMap, instanceJsonMap);
+    return Pair.of(instance, difference.entriesOnlyOnLeft());
+  }
+
+  private static Map<String, Object> flatten(Map<String, Object> map) {
+    return map.entrySet().stream().flatMap(JsonUtils::flatten)
+        .collect(LinkedHashMap::new, (m, e) -> m.put("/" + e.getKey(), e.getValue()), LinkedHashMap::putAll);
+  }
+
+  private static Stream<Map.Entry<String, Object>> flatten(Map.Entry<String, Object> entry) {
+    if (entry == null) {
+      return Stream.empty();
+    }
+
+    if (entry.getValue() instanceof Map<?, ?>) {
+      return ((Map<?, ?>) entry.getValue()).entrySet().stream()
+          .flatMap(e -> flatten(new AbstractMap.SimpleEntry<>(entry.getKey() + "/" + e.getKey(), e.getValue())));
+    }
+
+    if (entry.getValue() instanceof List<?>) {
+      List<?> list = (List<?>) entry.getValue();
+      return IntStream.range(0, list.size())
+          .mapToObj(i -> new AbstractMap.SimpleEntry<String, Object>(entry.getKey() + "/" + i, list.get(i)))
+          .flatMap(JsonUtils::flatten);
+    }
+
+    return Stream.of(entry);
   }
 
   public static <T> T stringToObject(String jsonString, TypeReference<T> valueTypeRef)
@@ -85,6 +149,11 @@ public class JsonUtils {
   public static JsonNode stringToJsonNode(String jsonString)
       throws IOException {
     return DEFAULT_READER.readTree(jsonString);
+  }
+
+  public static JsonNode stringToJsonNodeWithBigDecimal(String jsonString)
+      throws IOException {
+    return READER_WITH_BIG_DECIMAL.readTree(jsonString);
   }
 
   public static <T> T fileToObject(File jsonFile, Class<T> valueType)
@@ -108,11 +177,11 @@ public class JsonUtils {
   /**
    * Reads the first json object from the file that can contain multiple objects
    */
+  @Nullable
   public static JsonNode fileToFirstJsonNode(File jsonFile)
       throws IOException {
-    try (InputStream inputStream = new FileInputStream(jsonFile)) {
-      JsonFactory jf = new JsonFactory();
-      JsonParser jp = jf.createParser(inputStream);
+    JsonFactory jf = new JsonFactory();
+    try (InputStream inputStream = new FileInputStream(jsonFile); JsonParser jp = jf.createParser(inputStream)) {
       jp.setCodec(DEFAULT_MAPPER);
       jp.nextToken();
       if (jp.hasCurrentToken()) {
@@ -150,6 +219,11 @@ public class JsonUtils {
   public static <T> T jsonNodeToObject(JsonNode jsonNode, TypeReference<T> valueTypeRef)
       throws IOException {
     return DEFAULT_READER.forType(valueTypeRef).readValue(jsonNode);
+  }
+
+  public static Map<String, Object> jsonNodeToMap(JsonNode jsonNode)
+      throws IOException {
+    return DEFAULT_READER.forType(MAP_TYPE_REFERENCE).readValue(jsonNode);
   }
 
   public static String objectToString(Object object)
@@ -276,7 +350,12 @@ public class JsonUtils {
    * ]
    * </pre>
    */
-  public static List<Map<String, String>> flatten(JsonNode node) {
+  public static List<Map<String, String>> flatten(JsonNode node, JsonIndexConfig jsonIndexConfig) {
+    return flatten(node, jsonIndexConfig, 0, "$", false);
+  }
+
+  private static List<Map<String, String>> flatten(JsonNode node, JsonIndexConfig jsonIndexConfig, int level,
+      String path, boolean includePathMatched) {
     // Null
     if (node.isNull()) {
       return Collections.emptyList();
@@ -287,23 +366,42 @@ public class JsonUtils {
       return Collections.singletonList(Collections.singletonMap(VALUE_KEY, node.asText()));
     }
 
+    Preconditions.checkArgument(node.isArray() || node.isObject(), "Unexpected node type: %s", node.getNodeType());
+
+    // Do not flatten further for array and object when max level reached
+    int maxLevels = jsonIndexConfig.getMaxLevels();
+    if (maxLevels > 0 && level == maxLevels) {
+      return Collections.emptyList();
+    }
+
     // Array
     if (node.isArray()) {
-      List<Map<String, String>> results = new ArrayList<>();
+      if (jsonIndexConfig.isExcludeArray()) {
+        return Collections.emptyList();
+      }
       int numChildren = node.size();
+      if (numChildren == 0) {
+        return Collections.emptyList();
+      }
+      String childPath = path + ARRAY_PATH;
+      IncludeResult includeResult =
+          includePathMatched ? IncludeResult.MATCH : shouldInclude(jsonIndexConfig, childPath);
+      if (!includeResult._shouldInclude) {
+        return Collections.emptyList();
+      }
+      List<Map<String, String>> results = new ArrayList<>(numChildren);
       for (int i = 0; i < numChildren; i++) {
         JsonNode childNode = node.get(i);
         String arrayIndexValue = Integer.toString(i);
-        List<Map<String, String>> childResults = flatten(childNode);
+        List<Map<String, String>> childResults =
+            flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched);
         for (Map<String, String> childResult : childResults) {
-          if (!childResult.isEmpty()) {
-            Map<String, String> result = new TreeMap<>();
-            for (Map.Entry<String, String> entry : childResult.entrySet()) {
-              result.put(KEY_SEPARATOR + entry.getKey(), entry.getValue());
-            }
-            result.put(ARRAY_INDEX_KEY, arrayIndexValue);
-            results.add(result);
+          Map<String, String> result = new TreeMap<>();
+          for (Map.Entry<String, String> entry : childResult.entrySet()) {
+            result.put(KEY_SEPARATOR + entry.getKey(), entry.getValue());
           }
+          result.put(ARRAY_INDEX_KEY, arrayIndexValue);
+          results.add(result);
         }
       }
       return results;
@@ -320,8 +418,20 @@ public class JsonUtils {
     Iterator<Map.Entry<String, JsonNode>> fieldIterator = node.fields();
     while (fieldIterator.hasNext()) {
       Map.Entry<String, JsonNode> fieldEntry = fieldIterator.next();
+      String field = fieldEntry.getKey();
+      Set<String> excludeFields = jsonIndexConfig.getExcludeFields();
+      if (excludeFields != null && excludeFields.contains(field)) {
+        continue;
+      }
+      String childPath = path + KEY_SEPARATOR + field;
+      IncludeResult includeResult =
+          includePathMatched ? IncludeResult.MATCH : shouldInclude(jsonIndexConfig, childPath);
+      if (!includeResult._shouldInclude) {
+        continue;
+      }
       JsonNode childNode = fieldEntry.getValue();
-      List<Map<String, String>> childResults = flatten(childNode);
+      List<Map<String, String>> childResults =
+          flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched);
       int numChildResults = childResults.size();
 
       // Empty list - skip
@@ -330,7 +440,7 @@ public class JsonUtils {
       }
 
       // Single map - put all key-value pairs into the non-nested result map
-      String prefix = KEY_SEPARATOR + fieldEntry.getKey();
+      String prefix = KEY_SEPARATOR + field;
       if (numChildResults == 1) {
         Map<String, String> childResult = childResults.get(0);
         for (Map.Entry<String, String> entry : childResult.entrySet()) {
@@ -342,21 +452,11 @@ public class JsonUtils {
       // Multiple maps - put the results into a list to be processed later
       List<Map<String, String>> prefixedResults = new ArrayList<>(numChildResults);
       for (Map<String, String> childResult : childResults) {
-        if (!childResult.isEmpty()) {
-          Map<String, String> prefixedResult = new TreeMap<>();
-          for (Map.Entry<String, String> entry : childResult.entrySet()) {
-            prefixedResult.put(prefix + entry.getKey(), entry.getValue());
-          }
-          prefixedResults.add(prefixedResult);
+        Map<String, String> prefixedResult = new TreeMap<>();
+        for (Map.Entry<String, String> entry : childResult.entrySet()) {
+          prefixedResult.put(prefix + entry.getKey(), entry.getValue());
         }
-      }
-      int numPrefixedResults = prefixedResults.size();
-      if (numPrefixedResults == 0) {
-        continue;
-      }
-      if (numPrefixedResults == 1) {
-        nonNestedResult.putAll(prefixedResults.get(0));
-        continue;
+        prefixedResults.add(prefixedResult);
       }
       nestedResultsList.add(prefixedResults);
     }
@@ -377,10 +477,64 @@ public class JsonUtils {
       }
       return nestedResults;
     }
-    // If there are multiple child nodes with multiple records, calculate each combination of them as a new record.
-    List<Map<String, String>> results = new ArrayList<>();
-    unnestResults(nestedResultsList.get(0), nestedResultsList, 1, nonNestedResult, results);
-    return results;
+    // Multiple child nodes with multiple records
+    if (jsonIndexConfig.isDisableCrossArrayUnnest()) {
+      // Add each array individually
+      int numResults = 0;
+      for (List<Map<String, String>> nestedResults : nestedResultsList) {
+        numResults += nestedResults.size();
+      }
+      List<Map<String, String>> results = new ArrayList<>(numResults);
+      for (List<Map<String, String>> nestedResults : nestedResultsList) {
+        for (Map<String, String> nestedResult : nestedResults) {
+          nestedResult.putAll(nonNestedResult);
+          results.add(nestedResult);
+        }
+      }
+      return results;
+    } else {
+      // Calculate each combination of them as a new record
+      long numResults = 1;
+      for (List<Map<String, String>> nestedResults : nestedResultsList) {
+        numResults *= nestedResults.size();
+        Preconditions.checkState(numResults < MAX_COMBINATIONS, "Got too many combinations");
+      }
+      List<Map<String, String>> results = new ArrayList<>((int) numResults);
+      unnestResults(nestedResultsList.get(0), nestedResultsList, 1, nonNestedResult, results);
+      return results;
+    }
+  }
+
+  private static IncludeResult shouldInclude(JsonIndexConfig jsonIndexConfig, String path) {
+    Set<String> includePaths = jsonIndexConfig.getIncludePaths();
+    if (includePaths != null) {
+      if (includePaths.contains(path)) {
+        return IncludeResult.MATCH;
+      }
+      for (String includePath : includePaths) {
+        if (includePath.startsWith(path)) {
+          return IncludeResult.POTENTIAL_MATCH;
+        }
+      }
+      return IncludeResult.NOT_MATCH;
+    }
+    Set<String> excludePaths = jsonIndexConfig.getExcludePaths();
+    if (excludePaths != null && excludePaths.contains(path)) {
+      return IncludeResult.NOT_MATCH;
+    }
+    return IncludeResult.POTENTIAL_MATCH;
+  }
+
+  private enum IncludeResult {
+    MATCH(true, true), POTENTIAL_MATCH(true, false), NOT_MATCH(false, false);
+
+    final boolean _shouldInclude;
+    final boolean _includePathMatched;
+
+    IncludeResult(boolean shouldInclude, boolean includePathMatched) {
+      _shouldInclude = shouldInclude;
+      _includePathMatched = includePathMatched;
+    }
   }
 
   private static void unnestResults(List<Map<String, String>> currentResults,
@@ -417,6 +571,7 @@ public class JsonUtils {
     if (fieldsToUnnest == null) {
       fieldsToUnnest = new ArrayList<>();
     }
+    Preconditions.checkNotNull(jsonNode, "the JSON data shall be an object but it is null");
     Preconditions.checkState(jsonNode.isObject(), "the JSON data shall be an object");
     return getPinotSchemaFromJsonNode(jsonNode, fieldTypeMap, timeUnit, fieldsToUnnest, delimiter,
         collectionNotUnnestedToJson);
@@ -507,6 +662,8 @@ public class JsonUtils {
       return DataType.BOOLEAN;
     } else if (jsonNode.isBinary()) {
       return DataType.BYTES;
+    } else if (jsonNode.isBigDecimal()) {
+      return DataType.BIG_DECIMAL;
     } else {
       return DataType.STRING;
     }
@@ -531,9 +688,11 @@ public class JsonUtils {
         case DATE_TIME:
           Preconditions.checkState(isSingleValueField, "Time field: %s cannot be multi-valued", name);
           Preconditions.checkNotNull(timeUnit, "Time unit cannot be null");
-          pinotSchema.addField(new DateTimeFieldSpec(name, dataType,
-              new DateTimeFormatSpec(1, timeUnit.toString(), DateTimeFieldSpec.TimeFormat.EPOCH.toString()).getFormat(),
-              new DateTimeGranularitySpec(1, timeUnit).getGranularity()));
+          // TODO: Switch to new format after releasing 0.11.0
+          //       "EPOCH|" + timeUnit.name()
+          String format = "1:" + timeUnit.name() + ":EPOCH";
+          String granularity = "1:" + timeUnit.name();
+          pinotSchema.addField(new DateTimeFieldSpec(name, dataType, format, granularity));
           break;
         default:
           throw new UnsupportedOperationException("Unsupported field type: " + fieldType + " for field: " + name);

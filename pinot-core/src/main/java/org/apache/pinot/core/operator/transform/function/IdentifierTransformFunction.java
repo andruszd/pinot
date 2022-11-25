@@ -18,12 +18,14 @@
  */
 package org.apache.pinot.core.operator.transform.function;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import org.apache.pinot.core.operator.blocks.ProjectionBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.datasource.DataSourceMetadata;
+import org.apache.pinot.segment.spi.evaluator.TransformEvaluator;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 
 
@@ -31,7 +33,7 @@ import org.apache.pinot.segment.spi.index.reader.Dictionary;
  * The <code>IdentifierTransformFunction</code> class is a special transform function which is a wrapper on top of an
  * IDENTIFIER (column), and directly return the column value without any transformation.
  */
-public class IdentifierTransformFunction implements TransformFunction {
+public class IdentifierTransformFunction implements TransformFunction, PushDownTransformFunction {
   private final String _columnName;
   private final Dictionary _dictionary;
   private final TransformResultMetadata _resultMetadata;
@@ -42,6 +44,10 @@ public class IdentifierTransformFunction implements TransformFunction {
     DataSourceMetadata dataSourceMetadata = dataSource.getDataSourceMetadata();
     _resultMetadata = new TransformResultMetadata(dataSourceMetadata.getDataType(), dataSourceMetadata.isSingleValue(),
         _dictionary != null);
+  }
+
+  public String getColumnName() {
+    return _columnName;
   }
 
   @Override
@@ -94,6 +100,12 @@ public class IdentifierTransformFunction implements TransformFunction {
     return projectionBlock.getBlockValueSet(_columnName).getDoubleValuesSV();
   }
 
+
+  @Override
+  public BigDecimal[] transformToBigDecimalValuesSV(ProjectionBlock projectionBlock) {
+    return projectionBlock.getBlockValueSet(_columnName).getBigDecimalValuesSV();
+  }
+
   @Override
   public String[] transformToStringValuesSV(ProjectionBlock projectionBlock) {
     return projectionBlock.getBlockValueSet(_columnName).getStringValuesSV();
@@ -127,5 +139,71 @@ public class IdentifierTransformFunction implements TransformFunction {
   @Override
   public String[][] transformToStringValuesMV(ProjectionBlock projectionBlock) {
     return projectionBlock.getBlockValueSet(_columnName).getStringValuesMV();
+  }
+
+  @Override
+  public byte[][][] transformToBytesValuesMV(ProjectionBlock projectionBlock) {
+    return projectionBlock.getBlockValueSet(_columnName).getBytesValuesMV();
+  }
+
+  @Override
+  public void transformToIntValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator, int[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToLongValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator, long[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToFloatValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator, float[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToDoubleValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      double[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToBigDecimalValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      BigDecimal[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToStringValuesSV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      String[] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToIntValuesMV(ProjectionBlock projectionBlock, TransformEvaluator evaluator, int[][] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToLongValuesMV(ProjectionBlock projectionBlock, TransformEvaluator evaluator, long[][] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToFloatValuesMV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      float[][] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToDoubleValuesMV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      double[][] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
+  }
+
+  @Override
+  public void transformToStringValuesMV(ProjectionBlock projectionBlock, TransformEvaluator evaluator,
+      String[][] buffer) {
+    projectionBlock.fillValues(_columnName, evaluator, buffer);
   }
 }

@@ -20,7 +20,8 @@
 import { AxiosResponse } from 'axios';
 import { TableData, Instances, Instance, Tenants, ClusterConfig, TableName, TableSize,
   IdealState, QueryTables, TableSchema, SQLResult, ClusterName, ZKGetList, ZKConfig, OperationResponse,
-  BrokerList, ServerList
+  BrokerList, ServerList, UserList, TableList, UserObject, TaskProgressResponse, TableSegmentJobs, TaskRuntimeConfig,
+  SegmentDebugDetails, QuerySchemas
 } from 'Models';
 
 const headers = {
@@ -28,7 +29,7 @@ const headers = {
   'Accept': 'text/plain, */*; q=0.01'
 };
 
-import { baseApi, transformApi } from '../utils/axios-config';
+import { baseApi, baseApiWithErrors, transformApi } from '../utils/axios-config';
 
 export const getTenants = (): Promise<AxiosResponse<Tenants>> =>
   baseApi.get('/tenants');
@@ -45,17 +46,24 @@ export const getTenantTableDetails = (tableName: string): Promise<AxiosResponse<
 export const putTable = (name: string, params: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.put(`/tables/${name}`, params, { headers });
 
-export const getSchemaList = (): Promise<AxiosResponse<OperationResponse>> =>
+export const getSchemaList = (): Promise<AxiosResponse<QuerySchemas>> =>
   baseApi.get(`/schemas`);
 
 export const getSchema = (name: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.get(`/schemas/${name}`);
 
-export const putSchema = (name: string, params: string): Promise<AxiosResponse<OperationResponse>> =>
-  baseApi.put(`/schemas/${name}`, params, { headers });
+export const putSchema = (name: string, params: string, reload?: boolean): Promise<AxiosResponse<OperationResponse>> => {
+  let queryParams = {};
+  
+  if(reload) {
+    queryParams["reload"] = reload;
+  }
+
+  return baseApi.put(`/schemas/${name}`, params, { headers, params: queryParams });
+}
 
 export const getSegmentMetadata = (tableName: string, segmentName: string): Promise<AxiosResponse<IdealState>> =>
-  baseApi.get(`/segments/${tableName}/${segmentName}/metadata`);
+  baseApi.get(`/segments/${tableName}/${segmentName}/metadata?columns=*`);
 
 export const getTableSize = (name: string): Promise<AxiosResponse<TableSize>> =>
   baseApi.get(`/tables/${name}/size`);
@@ -87,6 +95,63 @@ export const setTableState = (name: string, stateName: string, tableType: string
 export const dropInstance = (name: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.delete(`instances/${name}`, { headers });
 
+export const getPeriodicTaskNames = (): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/periodictask/names`, { headers });
+
+export const getTaskTypes = (): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/tasktypes`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTaskTypeTasks = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/${taskType}/tasks`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTaskTypeState = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/${taskType}/state`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const stopTasks = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.put(`/tasks/${taskType}/stop`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const resumeTasks = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.put(`/tasks/${taskType}/resume`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const cleanupTasks = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.put(`/tasks/${taskType}/cleanup`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const deleteTasks = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.delete(`/tasks/${taskType}`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const sheduleTask = (tableName: string, taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.post(`/tasks/schedule?tableName=${tableName}&taskType=${taskType}`, null, { headers: { ...headers, Accept: 'application/json' } });
+
+export const executeTask = (data): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.post(`/tasks/execute`, data, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getJobDetail = (tableName: string, taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/scheduler/jobDetails?tableName=${tableName}&taskType=${taskType}`, { headers: { ...headers, Accept: 'application/json' } });
+  
+export const getMinionMeta = (tableName: string, taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/${taskType}/${tableName}/metadata`, { headers: { ...headers, Accept: 'application/json' } });
+  
+export const getTasks = (tableName: string, taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/${taskType}/${tableName}/state`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTaskRuntimeConfig = (taskName: string): Promise<AxiosResponse<TaskRuntimeConfig>> =>
+  baseApi.get(`/tasks/task/${taskName}/runtime/config`, { headers: { ...headers, Accept: 'application/json' }});
+
+export const getTaskDebug = (taskName: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/task/${taskName}/debug?verbosity=1`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTaskProgress = (taskName: string, subTaskName: string): Promise<AxiosResponse<TaskProgressResponse>> =>
+  baseApi.get(`/tasks/subtask/${taskName}/progress`, { headers: { ...headers, Accept: 'application/json' }, params: {subtaskNames: subTaskName} });
+
+export const getTaskGeneratorDebug = (taskName: string, taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/generator/${taskName}/${taskType}/debug`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTaskTypeDebug = (taskType: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tasks/${taskType}/debug?verbosity=1`, { headers: { ...headers, Accept: 'application/json' } });
+
+export const getTables = (params): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/tables`, { params, headers: { ...headers, Accept: 'application/json' } });
+
 export const getClusterConfig = (): Promise<AxiosResponse<ClusterConfig>> =>
   baseApi.get('/cluster/configs');
 
@@ -96,8 +161,8 @@ export const getQueryTables = (type?: string): Promise<AxiosResponse<QueryTables
 export const getTableSchema = (name: string): Promise<AxiosResponse<TableSchema>> =>
   baseApi.get(`/tables/${name}/schema`);
 
-export const getQueryResult = (params: Object, url: string): Promise<AxiosResponse<SQLResult>> =>
-  transformApi.post(`/${url}`, params, {headers});
+export const getQueryResult = (params: Object): Promise<AxiosResponse<SQLResult>> =>
+  transformApi.post(`/sql`, params, {headers});
 
 export const getClusterInfo = (): Promise<AxiosResponse<ClusterName>> =>
   baseApi.get('/cluster/info');
@@ -138,6 +203,12 @@ export const reloadStatus = (tableName: string, tableType: string): Promise<Axio
 export const deleteSegment = (tableName: string, instanceName: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.delete(`/segments/${tableName}/${instanceName}`, {headers});
 
+export const getTableJobs = (tableName: string): Promise<AxiosResponse<TableSegmentJobs>> => 
+  baseApi.get(`/table/${tableName}/jobs`);
+
+export const getSegmentReloadStatus = (jobId: string): Promise<AxiosResponse<OperationResponse>> =>
+  baseApi.get(`/segments/segmentReloadStatus/${jobId}`, {headers});
+
 export const deleteTable = (tableName: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.delete(`/tables/${tableName}`, {headers});
 
@@ -173,3 +244,23 @@ export const authenticateUser = (authToken): Promise<AxiosResponse<OperationResp
 
 export const getSegmentDebugInfo = (tableName: string, tableType: string): Promise<AxiosResponse<OperationResponse>> =>
   baseApi.get(`debug/tables/${tableName}?type=${tableType}&verbosity=10`);
+
+export const getSegmentLevelDebugDetails = async (tableName: string, segmentName: string): Promise<SegmentDebugDetails> => {
+  const response = await baseApiWithErrors.get(`debug/segments/${tableName}/${segmentName}`);
+  return response.data;
+}
+
+export const requestTable = (): Promise<AxiosResponse<TableList>> =>
+    baseApi.get(`/tables`);
+
+export const requestUserList = (): Promise<AxiosResponse<UserList>> =>
+    baseApi.get(`/users`);
+
+export const requestAddUser = (userObject: UserObject): Promise<AxiosResponse<any>> =>
+    baseApi.post('/users', JSON.stringify(userObject), {headers});
+
+export const requestDeleteUser = (userObject: UserObject): Promise<AxiosResponse<any>> =>
+    baseApi.delete(`/users/${userObject.username}?component=${userObject.component}`);
+
+export const requestUpdateUser = (userObject: UserObject, passwordChanged: boolean): Promise<AxiosResponse<any>> =>
+    baseApi.put(`/users/${userObject.username}?component=${userObject.component}&passwordChanged=${passwordChanged}`, JSON.stringify(userObject), {headers});

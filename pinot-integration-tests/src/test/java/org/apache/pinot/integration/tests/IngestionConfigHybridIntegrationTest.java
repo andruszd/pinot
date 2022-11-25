@@ -20,7 +20,8 @@ package org.apache.pinot.integration.tests;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.File;
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -60,16 +61,18 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
 
   @Override
   protected IngestionConfig getIngestionConfig() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    ingestionConfig.setStreamIngestionConfig(
+        new StreamIngestionConfig(Collections.singletonList(getStreamConfigMap())));
     FilterConfig filterConfig =
         new FilterConfig("Groovy({AirlineID == 19393 || ArrDelayMinutes <= 5 }, AirlineID, ArrDelayMinutes)");
-    List<TransformConfig> transformConfigs = new ArrayList<>();
-    transformConfigs.add(new TransformConfig("AmPm", "Groovy({DepTime < 1200 ? \"AM\": \"PM\"}, DepTime)"));
-    transformConfigs.add(new TransformConfig("millisSinceEpoch", "fromEpochDays(DaysSinceEpoch)"));
-    transformConfigs.add(new TransformConfig("lowerCaseDestCityName", "lower(DestCityName)"));
-
-    List<Map<String, String>> streamConfigMaps = new ArrayList<>();
-    streamConfigMaps.add(getStreamConfigMap());
-    return new IngestionConfig(null, new StreamIngestionConfig(streamConfigMaps), filterConfig, transformConfigs, null);
+    ingestionConfig.setFilterConfig(filterConfig);
+    List<TransformConfig> transformConfigs = Arrays.asList(
+        new TransformConfig("AmPm", "Groovy({DepTime < 1200 ? \"AM\": \"PM\"}, DepTime)"),
+        new TransformConfig("millisSinceEpoch", "fromEpochDays(DaysSinceEpoch)"),
+        new TransformConfig("lowerCaseDestCityName", "lower(DestCityName)"));
+    ingestionConfig.setTransformConfigs(transformConfigs);
+    return ingestionConfig;
   }
 
   @Override
@@ -138,8 +141,8 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
     addTableConfig(createRealtimeTableConfig(realtimeAvroFiles.get(0)));
 
     // Create and upload segments
-    ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(offlineAvroFiles, offlineTableConfig, schema, 0, _segmentDir, _tarDir);
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(offlineAvroFiles, offlineTableConfig, schema, 0, _segmentDir,
+        _tarDir);
     uploadSegments(getTableName(), _tarDir);
 
     // Push data into Kafka
@@ -154,13 +157,13 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
       throws Exception {
     // Select column created with transform function
     String sqlQuery = "Select millisSinceEpoch from " + DEFAULT_TABLE_NAME;
-    JsonNode response = postSqlQuery(sqlQuery);
+    JsonNode response = postQuery(sqlQuery);
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(0).asText(), "millisSinceEpoch");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(0).asText(), "LONG");
 
     // Select column created with transform function
     sqlQuery = "Select AmPm, DepTime from " + DEFAULT_TABLE_NAME;
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(0).asText(), "AmPm");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(1).asText(), "DepTime");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(0).asText(), "STRING");
@@ -173,7 +176,7 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
 
     // Select column created with transform function - offline table
     sqlQuery = "Select AmPm, DepTime from " + DEFAULT_TABLE_NAME + "_OFFLINE";
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(0).asText(), "AmPm");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(1).asText(), "DepTime");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(0).asText(), "STRING");
@@ -186,7 +189,7 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
 
     // Select column created with transform - realtime table
     sqlQuery = "Select AmPm, DepTime from " + DEFAULT_TABLE_NAME + "_REALTIME";
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(0).asText(), "AmPm");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(1).asText(), "DepTime");
     assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(0).asText(), "STRING");
@@ -199,18 +202,18 @@ public class IngestionConfigHybridIntegrationTest extends BaseClusterIntegration
 
     // Check there's no values that should've been filtered
     sqlQuery = "Select * from " + DEFAULT_TABLE_NAME + "  where AirlineID = 19393 or ArrDelayMinutes <= 5";
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     Assert.assertEquals(response.get("resultTable").get("rows").size(), 0);
 
     // Check there's no values that should've been filtered - realtime table
     sqlQuery =
         "Select * from " + DEFAULT_TABLE_NAME + "_REALTIME" + "  where AirlineID = 19393 or ArrDelayMinutes <= 5";
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     Assert.assertEquals(response.get("resultTable").get("rows").size(), 0);
 
     // Check there's no values that should've been filtered - offline table
     sqlQuery = "Select * from " + DEFAULT_TABLE_NAME + "_OFFLINE" + "  where AirlineID = 19393 or ArrDelayMinutes <= 5";
-    response = postSqlQuery(sqlQuery);
+    response = postQuery(sqlQuery);
     Assert.assertEquals(response.get("resultTable").get("rows").size(), 0);
   }
 

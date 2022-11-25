@@ -22,6 +22,7 @@ import com.google.common.base.Preconditions;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.util.TableSizeReader;
 import org.apache.pinot.spi.config.table.QuotaConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -41,13 +42,16 @@ public class StorageQuotaChecker {
   private final TableConfig _tableConfig;
   private final ControllerMetrics _controllerMetrics;
   private final boolean _isLeaderForTable;
+  private final PinotHelixResourceManager _pinotHelixResourceManager;
 
   public StorageQuotaChecker(TableConfig tableConfig, TableSizeReader tableSizeReader,
-      ControllerMetrics controllerMetrics, boolean isLeaderForTable) {
+      ControllerMetrics controllerMetrics, boolean isLeaderForTable,
+      PinotHelixResourceManager pinotHelixResourceManager) {
     _tableConfig = tableConfig;
     _tableSizeReader = tableSizeReader;
     _controllerMetrics = controllerMetrics;
     _isLeaderForTable = isLeaderForTable;
+    _pinotHelixResourceManager = pinotHelixResourceManager;
   }
 
   public static class QuotaCheckerResponse {
@@ -80,7 +84,8 @@ public class StorageQuotaChecker {
     // 3. update predicted segment sizes
     // 4. is the updated size within quota
     QuotaConfig quotaConfig = _tableConfig.getQuotaConfig();
-    int numReplicas = _tableConfig.getValidationConfig().getReplicationNumber();
+    int numReplicas = _pinotHelixResourceManager.getNumReplicas(_tableConfig);
+
     final String tableNameWithType = _tableConfig.getTableName();
 
     if (quotaConfig == null || quotaConfig.getStorage() == null) {
@@ -110,10 +115,9 @@ public class StorageQuotaChecker {
 
     if (tableSubtypeSize._missingSegments > 0) {
       if (tableSubtypeSize._estimatedSizeInBytes > allowedStorageBytes) {
-        return failure(
-            "Table " + tableNameWithType + " already over quota. Estimated size for all replicas is " + DataSizeUtils
-                .fromBytes(tableSubtypeSize._estimatedSizeInBytes) + ". Configured size for " + numReplicas + " is "
-                + DataSizeUtils.fromBytes(allowedStorageBytes));
+        return failure("Table " + tableNameWithType + " already over quota. Estimated size for all replicas is "
+            + DataSizeUtils.fromBytes(tableSubtypeSize._estimatedSizeInBytes) + ". Configured size for " + numReplicas
+            + " is " + DataSizeUtils.fromBytes(allowedStorageBytes));
       } else {
         return success("Missing size report for " + tableSubtypeSize._missingSegments
             + " segments. Bypassing storage quota check for " + tableNameWithType);

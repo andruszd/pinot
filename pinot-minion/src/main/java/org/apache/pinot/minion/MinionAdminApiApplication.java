@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.List;
+import org.apache.pinot.common.utils.LoggerFileServer;
 import org.apache.pinot.core.transport.ListenerConfig;
 import org.apache.pinot.core.util.ListenerConfigUtil;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -45,17 +46,24 @@ import org.glassfish.jersey.server.ResourceConfig;
 public class MinionAdminApiApplication extends ResourceConfig {
   private static final String RESOURCE_PACKAGE = "org.apache.pinot.minion.api.resources";
   public static final String PINOT_CONFIGURATION = "pinotConfiguration";
+  public static final String MINION_INSTANCE_ID = "minionInstanceId";
 
   private HttpServer _httpServer;
+  private final boolean _useHttps;
 
-  public MinionAdminApiApplication(PinotConfiguration minionConf) {
+  public MinionAdminApiApplication(String instanceId, PinotConfiguration minionConf) {
     packages(RESOURCE_PACKAGE);
     property(PINOT_CONFIGURATION, minionConf);
-
+    _useHttps = Boolean.parseBoolean(minionConf.getProperty(CommonConstants.Minion.CONFIG_OF_SWAGGER_USE_HTTPS));
     register(new AbstractBinder() {
       @Override
       protected void configure() {
         // TODO: Add bindings as needed in future.
+        bind(instanceId).named(MINION_INSTANCE_ID);
+        String loggerRootDir = minionConf.getProperty(CommonConstants.Minion.CONFIG_OF_LOGGER_ROOT_DIR);
+        if (loggerRootDir != null) {
+          bind(new LoggerFileServer(loggerRootDir)).to(LoggerFileServer.class);
+        }
       }
     });
 
@@ -71,18 +79,21 @@ public class MinionAdminApiApplication extends ResourceConfig {
     } catch (IOException e) {
       throw new RuntimeException("Failed to start http server", e);
     }
-    synchronized (PinotReflectionUtils.getReflectionLock()) {
-      setupSwagger();
-    }
+    PinotReflectionUtils.runWithLock(this::setupSwagger);
   }
 
   private void setupSwagger() {
     BeanConfig beanConfig = new BeanConfig();
     beanConfig.setTitle("Pinot Minion API");
     beanConfig.setDescription("APIs for accessing Pinot Minion information");
-    beanConfig.setContact("https://github.com/apache/incubator-pinot");
+    beanConfig.setContact("https://github.com/apache/pinot");
     beanConfig.setVersion("1.0");
-    beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
+    beanConfig.setExpandSuperTypes(false);
+    if (_useHttps) {
+      beanConfig.setSchemes(new String[]{CommonConstants.HTTPS_PROTOCOL});
+    } else {
+      beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
+    }
     beanConfig.setBasePath("/");
     beanConfig.setResourcePackage(RESOURCE_PACKAGE);
     beanConfig.setScan(true);
@@ -92,7 +103,7 @@ public class MinionAdminApiApplication extends ResourceConfig {
     _httpServer.getServerConfiguration().addHttpHandler(httpHandler, "/api/", "/help/");
 
     URL swaggerDistLocation =
-        MinionAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.18.2/");
+        MinionAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.23.11/");
     CLStaticHttpHandler swaggerDist = new CLStaticHttpHandler(new URLClassLoader(new URL[]{swaggerDistLocation}));
     _httpServer.getServerConfiguration().addHttpHandler(swaggerDist, "/swaggerui-dist/");
   }

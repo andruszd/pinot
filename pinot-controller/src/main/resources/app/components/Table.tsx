@@ -26,6 +26,8 @@ import {
   makeStyles,
   useTheme,
 } from '@material-ui/core/styles';
+import ComponentLoader from './ComponentLoader';
+import Dialog from '@material-ui/core/Dialog';
 import Table from '@material-ui/core/Table';
 import TableBody from '@material-ui/core/TableBody';
 import TableCell from '@material-ui/core/TableCell';
@@ -41,9 +43,10 @@ import KeyboardArrowRight from '@material-ui/icons/KeyboardArrowRight';
 import LastPageIcon from '@material-ui/icons/LastPage';
 import ArrowDropDownIcon from '@material-ui/icons/ArrowDropDown';
 import ArrowDropUpIcon from '@material-ui/icons/ArrowDropUp';
-import { NavLink, useHistory } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import Chip from '@material-ui/core/Chip';
-import _ from 'lodash';
+import { get, has, orderBy } from 'lodash';
+import app_state from '../app_state';
 import Utils from '../utils/Utils';
 import TableToolbar from './TableToolbar';
 import SimpleAccordion from './SimpleAccordion';
@@ -51,9 +54,8 @@ import SimpleAccordion from './SimpleAccordion';
 type Props = {
   title?: string,
   data: TableData,
-  noOfRows?: number,
+  defaultRowsPerPage?: number,
   addLinks?: boolean,
-  isPagination?: boolean,
   cellClickCallback?: Function,
   isCellClickable?: boolean,
   highlightBackground?: boolean,
@@ -152,7 +154,7 @@ const useStyles = makeStyles((theme) => ({
   spacer: {
     flex: '0 1 auto',
   },
-  cellSatusGood: {
+  cellStatusGood: {
     color: '#4CAF50',
     border: '1px solid #4CAF50',
   },
@@ -255,9 +257,8 @@ TablePaginationActions.propTypes = {
 export default function CustomizedTables({
   title,
   data,
-  noOfRows,
+  defaultRowsPerPage,
   addLinks,
-  isPagination,
   cellClickCallback,
   isCellClickable,
   highlightBackground,
@@ -270,14 +271,28 @@ export default function CustomizedTables({
   accordionToggleObject,
   tooltipData
 }: Props) {
-  const history = useHistory();
+  // Separate the initial and final data into two separte state variables.
+  // This way we can filter and sort the data without affecting the original data.
+  // If the component receives new data, we can simply set the new data to the initial data,
+  // and the filters and sorts will be applied to the new data.
+  const [initialData, setInitialData] = React.useState(data);
   const [finalData, setFinalData] = React.useState(Utils.tableFormat(data));
+  React.useEffect( () => {
+    setInitialData(data);
+  }, [data]);
+  // We do not use data.isLoading directly in the renderer because there's a gap between data
+  // changing and finalData being set. Without this, there's a flicker where we go from
+  // loading -> no records found -> not loading + data.
+  const [isLoading, setIsLoading] = React.useState(false);
+  React.useEffect( () => {
+    setIsLoading(data.isLoading || false);
+  }, [finalData]);
 
   const [order, setOrder] = React.useState(false);
   const [columnClicked, setColumnClicked] = React.useState('');
 
   const classes = useStyles();
-  const [rowsPerPage, setRowsPerPage] = React.useState(noOfRows || 10);
+  const [rowsPerPage, setRowsPerPage] = React.useState(defaultRowsPerPage || 10);
   const [page, setPage] = React.useState(0);
 
   const handleChangeRowsPerPage = (
@@ -297,9 +312,9 @@ export default function CustomizedTables({
 
   const filterSearchResults = React.useCallback((str: string) => {
     if (str === '') {
-      setFinalData(finalData);
+      setFinalData(Utils.tableFormat(data));
     } else {
-      const filteredRescords = data.records.filter((record) => {
+      const filteredRescords = initialData.records.filter((record) => {
         const searchFound = record.find(
           (cell) => cell.toString().toLowerCase().indexOf(str) > -1
         );
@@ -310,7 +325,7 @@ export default function CustomizedTables({
       });
       setFinalData(filteredRescords);
     }
-  }, [data, setFinalData]);
+  }, [initialData, setFinalData]);
 
   React.useEffect(() => {
     clearTimeout(timeoutId.current);
@@ -323,21 +338,17 @@ export default function CustomizedTables({
     };
   }, [search, timeoutId, filterSearchResults]);
 
-  React.useCallback(()=>{
-    setFinalData(Utils.tableFormat(data));
-  }, [data]);
-
   const styleCell = (str: string) => {
-    if (str === 'Good' || str.toLowerCase() === 'online' || str.toLowerCase() === 'alive') {
+    if (str === 'Good' || str.toLowerCase() === 'online' || str.toLowerCase() === 'alive' || str.toLowerCase() === 'true') {
       return (
         <StyledChip
           label={str}
-          className={classes.cellSatusGood}
+          className={classes.cellStatusGood}
           variant="outlined"
         />
       );
     }
-    if (str === 'Bad' || str.toLowerCase() === 'offline' || str.toLowerCase() === 'dead') {
+    if (str === 'Bad' || str.toLowerCase() === 'offline' || str.toLowerCase() === 'dead' || str.toLowerCase() === 'false') {
       return (
         <StyledChip
           label={str}
@@ -376,6 +387,71 @@ export default function CustomizedTables({
     return (<span>{str.toString()}</span>);
   };
 
+  const [modalStatus, setModalOpen] = React.useState({});
+  const handleModalOpen = (rowIndex) => () => setModalOpen({...modalStatus, [rowIndex]: true});
+  const handleModalClose = (rowIndex) => () => setModalOpen({...modalStatus, [rowIndex]: false});
+
+  const makeCell = (cellData, rowIndex) => {
+    if (Object.prototype.toString.call(cellData) === '[object Object]') {
+      // render custom table cell
+      if (cellData && cellData.customRenderer) {
+        return <>{cellData.customRenderer}</>;
+      }
+
+      if (has(cellData, 'component') && cellData.component) {
+
+
+        let cell = (styleCell(cellData.value))
+        let statusModal = (
+            <Dialog
+                onClose={handleModalClose(rowIndex)}
+                open={get(modalStatus, rowIndex, false)}
+                fullWidth={true}
+                maxWidth={'xl'}
+            >
+              {cellData.component}
+            </Dialog>
+        )
+        cell = (
+            React.cloneElement(
+                cell,
+                {onClick: handleModalOpen(rowIndex)},
+            )
+        );
+        if (has(cellData, 'tooltip') && cellData.tooltip) {
+          cell = (
+              <Tooltip
+                  title={cellData.tooltip}
+                  placement="top"
+                  arrow
+              >
+                {cell}
+              </Tooltip>
+          )
+        };
+        return (
+            <>
+              {cell}
+              {statusModal}
+            </>
+        );
+      } else if (has(cellData, 'tooltip') && cellData.tooltip) {
+        return (
+            <Tooltip
+                title={cellData.tooltip}
+                placement="top"
+                arrow
+            >
+              {styleCell(cellData.value)}
+            </Tooltip>
+        );
+      } else {
+        return styleCell(cellData.value);
+      }
+    }
+    return styleCell(cellData.toString());
+  }
+
   const renderTableComponent = () => {
     return (
       <>
@@ -383,21 +459,21 @@ export default function CustomizedTables({
           <Table className={classes.table} size="small" stickyHeader={isSticky}>
             <TableHead>
               <TableRow>
-                {data.columns.map((column, index) => (
+                {data.columns && data.columns.map((column, index) => (
                   <StyledTableCell
                     className={classes.head}
                     key={index}
                     onClick={() => {
                       if(column === 'Number of Segments'){
                         const data = finalData.sort((a,b)=>{
-                          const aSegmentInt = parseInt(a[column]);
-                          const bSegmentInt = parseInt(b[column]);
+                          const aSegmentInt = parseInt(a[column+app_state.columnNameSeparator+index]);
+                          const bSegmentInt = parseInt(b[column+app_state.columnNameSeparator+index]);
                           const result = order ? (aSegmentInt > bSegmentInt) : (aSegmentInt < bSegmentInt);
                           return result ? 1 : -1;
                         });
-                        setFinalData(data);
+                        setFinalData(finalData);
                       } else {
-                        setFinalData(_.orderBy(finalData, column, order ? 'asc' : 'desc'));
+                        setFinalData(orderBy(finalData, column+app_state.columnNameSeparator+index, order ? 'asc' : 'desc'));
                       }
                       setOrder(!order);
                       setColumnClicked(column);
@@ -427,7 +503,8 @@ export default function CustomizedTables({
               </TableRow>
             </TableHead>
             <TableBody className={classes.body}>
-              {finalData.length === 0 ? (
+              {isLoading ? <ComponentLoader /> : (
+                finalData.length === 0 ? (
                 <TableRow>
                   <StyledTableCell
                     className={classes.nodata}
@@ -450,9 +527,7 @@ export default function CustomizedTables({
                         }
                         return addLinks && !idx ? (
                           <StyledTableCell key={idx}>
-                            <a className={classes.clickable} onClick={()=>{
-                              history.push(`${encodeURI(`${url}${encodeURIComponent(cell)}`)}`)
-                            }}>{cell}</a>
+                            <Link to={`${encodeURI(`${url}${encodeURIComponent(cell)}`)}`}>{cell}</Link>
                           </StyledTableCell>
                         ) : (
                           <StyledTableCell
@@ -460,20 +535,17 @@ export default function CustomizedTables({
                             className={isCellClickable ? classes.isCellClickable : (isSticky ? classes.isSticky : '')}
                             onClick={() => {cellClickCallback && cellClickCallback(cell);}}
                           >
-                            {Object.prototype.toString.call(cell) === '[object Object]' ?
-                              <Tooltip title={cell?.tooltip || ''} placement="top" arrow>{styleCell(cell.value.toString())}</Tooltip>
-                            : styleCell(cell.toString())
-                            }
+                            {makeCell(cell ?? '--', index)}
                           </StyledTableCell>
                         );
                       })}
                     </StyledTableRow>
                   ))
-              )}
+              ))}
             </TableBody>
           </Table>
         </TableContainer>
-        {isPagination && finalData.length > 10 ? (
+        {finalData.length > 10 ? (
           <TablePagination
             rowsPerPageOptions={[5, 10, 25]}
             component="div"

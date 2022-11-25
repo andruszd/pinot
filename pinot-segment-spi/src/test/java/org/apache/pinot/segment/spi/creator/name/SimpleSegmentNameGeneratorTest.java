@@ -80,6 +80,7 @@ public class SimpleSegmentNameGeneratorTest {
       Assert.fail();
     } catch (IllegalArgumentException e) {
       // Expected
+      assertEquals(e.getMessage(), "Invalid partial or full segment name: 12|34");
     }
   }
 }

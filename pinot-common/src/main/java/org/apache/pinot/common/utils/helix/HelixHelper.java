@@ -21,6 +21,7 @@ package org.apache.pinot.common.utils.helix;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -29,7 +30,6 @@ import java.util.concurrent.Callable;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import org.I0Itec.zkclient.exception.ZkBadVersionException;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.helix.AccessOption;
 import org.apache.helix.HelixAdmin;
@@ -37,17 +37,23 @@ import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
 import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
-import org.apache.helix.ZNRecord;
-import org.apache.helix.manager.zk.ZNRecordSerializer;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.HelixConfigScope.ConfigScopeProperty;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
+import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
+import org.apache.pinot.common.helix.ExtraInstanceConfig;
+import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.utils.config.TagNameUtils;
+import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.BrokerResourceStateModel;
+import org.apache.pinot.spi.utils.InstanceTypeUtils;
 import org.apache.pinot.spi.utils.retry.RetryPolicies;
 import org.apache.pinot.spi.utils.retry.RetryPolicy;
 import org.slf4j.Logger;
@@ -83,12 +89,12 @@ public class HelixHelper {
    * @param helixManager The HelixManager used to interact with the Helix cluster
    * @param resourceName The resource for which to update the ideal state
    * @param updater A function that returns an updated ideal state given an input ideal state
+   * @return updated ideal state if successful, null if not
    */
-  // TODO: since updater always update ideal state in place, it should return boolean indicating whether the ideal
-  //  state get changed.
-  public static void updateIdealState(final HelixManager helixManager, final String resourceName,
+  public static IdealState updateIdealState(final HelixManager helixManager, final String resourceName,
       final Function<IdealState, IdealState> updater, RetryPolicy policy, final boolean noChangeOk) {
     try {
+      IdealStateWrapper idealStateWrapper = new IdealStateWrapper();
       policy.attempt(new Callable<Boolean>() {
         @Override
         public Boolean call() {
@@ -133,6 +139,7 @@ public class HelixHelper {
               if (dataAccessor.getBaseDataAccessor()
                   .set(idealStateKey.getPath(), updatedZNRecord, idealState.getRecord().getVersion(),
                       AccessOption.PERSISTENT)) {
+                idealStateWrapper._idealState = updatedIdealState;
                 return true;
               } else {
                 LOGGER.warn("Failed to update ideal state for resource: {}", resourceName);
@@ -152,13 +159,19 @@ public class HelixHelper {
             } else {
               LOGGER.warn("Idempotent or null ideal state update for resource {}, skipping update.", resourceName);
             }
+            idealStateWrapper._idealState = idealState;
             return true;
           }
         }
       });
+      return idealStateWrapper._idealState;
     } catch (Exception e) {
       throw new RuntimeException("Caught exception while updating ideal state for resource: " + resourceName, e);
     }
+  }
+
+  private static class IdealStateWrapper {
+    IdealState _idealState;
   }
 
   /**
@@ -175,14 +188,59 @@ public class HelixHelper {
     }
   }
 
-  public static void updateIdealState(HelixManager helixManager, String resourceName,
+  public static IdealState updateIdealState(HelixManager helixManager, String resourceName,
       Function<IdealState, IdealState> updater) {
-    updateIdealState(helixManager, resourceName, updater, DEFAULT_TABLE_IDEALSTATES_UPDATE_RETRY_POLICY, false);
+    return updateIdealState(helixManager, resourceName, updater, DEFAULT_TABLE_IDEALSTATES_UPDATE_RETRY_POLICY, false);
   }
 
-  public static void updateIdealState(final HelixManager helixManager, final String resourceName,
+  public static IdealState updateIdealState(final HelixManager helixManager, final String resourceName,
       final Function<IdealState, IdealState> updater, RetryPolicy policy) {
-    updateIdealState(helixManager, resourceName, updater, policy, false);
+    return updateIdealState(helixManager, resourceName, updater, policy, false);
+  }
+
+  /**
+   * Updates broker resource ideal state for the given broker with the given broker tags. Optional {@code tablesAdded}
+   * and {@code tablesRemoved} can be provided to track the tables added/removed during the update.
+   */
+  public static void updateBrokerResource(HelixManager helixManager, String brokerId, List<String> brokerTags,
+      @Nullable List<String> tablesAdded, @Nullable List<String> tablesRemoved) {
+    Preconditions.checkArgument(InstanceTypeUtils.isBroker(brokerId), "Invalid broker id: %s", brokerId);
+    for (String brokerTag : brokerTags) {
+      Preconditions.checkArgument(TagNameUtils.isBrokerTag(brokerTag), "Invalid broker tag: %s", brokerTag);
+    }
+
+    Set<String> tablesForBrokerTag;
+    int numBrokerTags = brokerTags.size();
+    if (numBrokerTags == 0) {
+      tablesForBrokerTag = Collections.emptySet();
+    } else if (numBrokerTags == 1) {
+      tablesForBrokerTag = getTablesForBrokerTag(helixManager, brokerTags.get(0));
+    } else {
+      tablesForBrokerTag = getTablesForBrokerTags(helixManager, brokerTags);
+    }
+
+    updateIdealState(helixManager, BROKER_RESOURCE, idealState -> {
+      if (tablesAdded != null) {
+        tablesAdded.clear();
+      }
+      if (tablesRemoved != null) {
+        tablesRemoved.clear();
+      }
+      for (Map.Entry<String, Map<String, String>> entry : idealState.getRecord().getMapFields().entrySet()) {
+        String tableNameWithType = entry.getKey();
+        Map<String, String> brokerAssignment = entry.getValue();
+        if (tablesForBrokerTag.contains(tableNameWithType)) {
+          if (brokerAssignment.put(brokerId, BrokerResourceStateModel.ONLINE) == null && tablesAdded != null) {
+            tablesAdded.add(tableNameWithType);
+          }
+        } else {
+          if (brokerAssignment.remove(brokerId) != null && tablesRemoved != null) {
+            tablesRemoved.add(tableNameWithType);
+          }
+        }
+      }
+      return idealState;
+    });
   }
 
   /**
@@ -320,8 +378,8 @@ public class HelixHelper {
 
     // Removing partitions from ideal state
     LOGGER.info("Trying to remove resource {} from idealstate", resourceTag);
-    HelixHelper
-        .updateIdealState(helixManager, CommonConstants.Helix.BROKER_RESOURCE_INSTANCE, updater, DEFAULT_RETRY_POLICY);
+    HelixHelper.updateIdealState(helixManager, CommonConstants.Helix.BROKER_RESOURCE_INSTANCE, updater,
+        DEFAULT_RETRY_POLICY);
   }
 
   /**
@@ -495,12 +553,12 @@ public class HelixHelper {
       TableType tableType) {
     Set<String> serverInstancesWithType = new HashSet<>();
     if (tableType == null || tableType == TableType.OFFLINE) {
-      serverInstancesWithType
-          .addAll(HelixHelper.getInstancesWithTag(instanceConfigs, TagNameUtils.getOfflineTagForTenant(tenant)));
+      serverInstancesWithType.addAll(
+          HelixHelper.getInstancesWithTag(instanceConfigs, TagNameUtils.getOfflineTagForTenant(tenant)));
     }
     if (tableType == null || tableType == TableType.REALTIME) {
-      serverInstancesWithType
-          .addAll(HelixHelper.getInstancesWithTag(instanceConfigs, TagNameUtils.getRealtimeTagForTenant(tenant)));
+      serverInstancesWithType.addAll(
+          HelixHelper.getInstancesWithTag(instanceConfigs, TagNameUtils.getRealtimeTagForTenant(tenant)));
     }
     return serverInstancesWithType;
   }
@@ -519,6 +577,28 @@ public class HelixHelper {
     return new HashSet<>(getInstancesConfigsWithTag(instanceConfigs, TagNameUtils.getBrokerTagForTenant(tenant)));
   }
 
+  public static Set<String> getTablesForBrokerTag(HelixManager helixManager, String brokerTag) {
+    Set<String> tablesForBrokerTag = new HashSet<>();
+    List<TableConfig> tableConfigs = ZKMetadataProvider.getAllTableConfigs(helixManager.getHelixPropertyStore());
+    for (TableConfig tableConfig : tableConfigs) {
+      if (TagNameUtils.getBrokerTagForTenant(tableConfig.getTenantConfig().getBroker()).equals(brokerTag)) {
+        tablesForBrokerTag.add(tableConfig.getTableName());
+      }
+    }
+    return tablesForBrokerTag;
+  }
+
+  public static Set<String> getTablesForBrokerTags(HelixManager helixManager, List<String> brokerTags) {
+    Set<String> tablesForBrokerTags = new HashSet<>();
+    List<TableConfig> tableConfigs = ZKMetadataProvider.getAllTableConfigs(helixManager.getHelixPropertyStore());
+    for (TableConfig tableConfig : tableConfigs) {
+      if (brokerTags.contains(TagNameUtils.getBrokerTagForTenant(tableConfig.getTenantConfig().getBroker()))) {
+        tablesForBrokerTags.add(tableConfig.getTableName());
+      }
+    }
+    return tablesForBrokerTags;
+  }
+
   /**
    * Returns the instance config for a specific instance.
    */
@@ -535,9 +615,9 @@ public class HelixHelper {
     // NOTE: Use HelixDataAccessor.setProperty() instead of HelixAdmin.setInstanceConfig() because the latter explicitly
     // forbids instance host/port modification
     HelixDataAccessor helixDataAccessor = helixManager.getHelixDataAccessor();
-    Preconditions.checkState(helixDataAccessor
-            .setProperty(helixDataAccessor.keyBuilder().instanceConfig(instanceConfig.getId()), instanceConfig),
-        "Failed to update instance config for instance: " + instanceConfig.getId());
+    Preconditions.checkState(
+        helixDataAccessor.setProperty(helixDataAccessor.keyBuilder().instanceConfig(instanceConfig.getId()),
+            instanceConfig), "Failed to update instance config for instance: " + instanceConfig.getId());
   }
 
   /**
@@ -563,6 +643,18 @@ public class HelixHelper {
   }
 
   /**
+   * Updates a tlsPort value into Pinot instance config so it can be retrieved later
+   * @param instanceConfig the instance config to update
+   * @param tlsPort the tlsPort number
+   * @return true if updated
+   */
+  public static boolean updateTlsPort(InstanceConfig instanceConfig, int tlsPort) {
+    ExtraInstanceConfig pinotInstanceConfig = new ExtraInstanceConfig(instanceConfig);
+    pinotInstanceConfig.setTlsPort(String.valueOf(tlsPort));
+    return true;
+  }
+
+  /**
    * Adds default tags to the instance config if no tag exists, returns {@code true} if the default tags are added,
    * {@code false} otherwise.
    * <p>The {@code defaultTagsSupplier} is a function which is only invoked when the instance does not have any tag.
@@ -581,5 +673,18 @@ public class HelixHelper {
       }
     }
     return false;
+  }
+
+  /**
+   * Removes the disabled partitions from the instance config. Sometimes a partition can be accidentally disabled, and
+   * not re-enabled for some reason. When an instance is restarted, we should remove these disabled partitions so that
+   * they can be processed.
+   */
+  public static boolean removeDisabledPartitions(InstanceConfig instanceConfig) {
+    ZNRecord record = instanceConfig.getRecord();
+    String disabledPartitionsKey = InstanceConfig.InstanceConfigProperty.HELIX_DISABLED_PARTITION.name();
+    boolean listUpdated = record.getListFields().remove(disabledPartitionsKey) != null;
+    boolean mapUpdated = record.getMapFields().remove(disabledPartitionsKey) != null;
+    return listUpdated | mapUpdated;
   }
 }

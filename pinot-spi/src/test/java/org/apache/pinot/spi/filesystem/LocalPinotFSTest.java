@@ -21,6 +21,10 @@ package org.apache.pinot.spi.filesystem;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -205,8 +209,16 @@ public class LocalPinotFSTest {
       // Expected.
     }
 
-    // Check that directory only copy worked
-    localPinotFS.copy(firstTempDir.toURI(), secondTempDir.toURI());
+    // Check that directory only copy doesn't work with default 'copy'
+    try {
+      localPinotFS.copy(firstTempDir.toURI(), secondTempDir.toURI());
+      fail();
+    } catch (IllegalArgumentException e) {
+      // expected.
+    }
+
+    // Copying directory works with 'copyDir'
+    localPinotFS.copyDir(firstTempDir.toURI(), secondTempDir.toURI());
     Assert.assertTrue(localPinotFS.exists(secondTempDir.toURI()));
 
     // Copying directory with files to directory with files
@@ -215,12 +227,12 @@ public class LocalPinotFSTest {
     File newTestFile = new File(secondTempDir, "newTestFile");
     Assert.assertTrue(newTestFile.createNewFile(), "Could not create file " + newTestFile.getPath());
 
-    localPinotFS.copy(firstTempDir.toURI(), secondTempDir.toURI());
-    Assert.assertEquals(localPinotFS.listFiles(secondTempDir.toURI(), true).length, 1);
+    localPinotFS.copyDir(firstTempDir.toURI(), secondTempDir.toURI());
+    Assert.assertEquals(localPinotFS.listFiles(secondTempDir.toURI(), false).length, 1);
 
     // Copying directory with files under another directory.
     File firstTempDirUnderSecondTempDir = new File(secondTempDir, firstTempDir.getName());
-    localPinotFS.copy(firstTempDir.toURI(), firstTempDirUnderSecondTempDir.toURI());
+    localPinotFS.copyDir(firstTempDir.toURI(), firstTempDirUnderSecondTempDir.toURI());
     Assert.assertTrue(localPinotFS.exists(firstTempDirUnderSecondTempDir.toURI()));
     // There're two files/directories under secondTempDir.
     Assert.assertEquals(localPinotFS.listFiles(secondTempDir.toURI(), false).length, 2);
@@ -232,7 +244,7 @@ public class LocalPinotFSTest {
       localPinotFS.length(firstTempDir.toURI());
       fail();
     } catch (IllegalArgumentException e) {
-
+      // expected.
     }
 
     Assert.assertTrue(testFile.exists());
@@ -241,5 +253,61 @@ public class LocalPinotFSTest {
     Assert.assertTrue(localPinotFS.exists(secondTestFileUri));
     localPinotFS.copyToLocalFile(testFile.toURI(), new File(secondTestFileUri));
     Assert.assertTrue(localPinotFS.exists(secondTestFileUri));
+  }
+
+  @Test
+  public void testListFilesWithMetadata()
+      throws IOException {
+    LocalPinotFS localPinotFS = new LocalPinotFS();
+    File tempDirPath = new File(_absoluteTmpDirPath, "test-list-files-with-md");
+    Assert.assertTrue(tempDirPath.mkdir());
+
+    // Create a testDir and file underneath directory
+    int count = 5;
+    List<String> expectedNonRecursive = new ArrayList<>();
+    List<String> expectedRecursive = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      File testDir = new File(tempDirPath, "testDir" + i);
+      Assert.assertTrue(testDir.mkdir());
+      expectedNonRecursive.add(testDir.getAbsolutePath());
+
+      File testFile = new File(testDir, "testFile" + i);
+      Assert.assertTrue(testFile.createNewFile());
+      expectedRecursive.add(testDir.getAbsolutePath());
+      expectedRecursive.add(testFile.getAbsolutePath());
+    }
+    File testDirEmpty = new File(tempDirPath, "testDirEmpty");
+    Assert.assertTrue(testDirEmpty.mkdir());
+    expectedNonRecursive.add(testDirEmpty.getAbsolutePath());
+    expectedRecursive.add(testDirEmpty.getAbsolutePath());
+
+    File testRootFile = new File(tempDirPath, "testRootFile");
+    Assert.assertTrue(testRootFile.createNewFile());
+    expectedNonRecursive.add(testRootFile.getAbsolutePath());
+    expectedRecursive.add(testRootFile.getAbsolutePath());
+
+    // Assert that recursive list files and nonrecursive list files are as expected
+    String[] files = localPinotFS.listFiles(tempDirPath.toURI(), false);
+    Assert.assertEquals(files.length, count + 2);
+    Assert.assertTrue(expectedNonRecursive.containsAll(Arrays.asList(files)), Arrays.toString(files));
+    files = localPinotFS.listFiles(tempDirPath.toURI(), true);
+    Assert.assertEquals(files.length, count * 2 + 2);
+    Assert.assertTrue(expectedRecursive.containsAll(Arrays.asList(files)), Arrays.toString(files));
+
+    // Assert that recursive list files and nonrecursive list files with file info are as expected
+    List<FileMetadata> fileMetadata = localPinotFS.listFilesWithMetadata(tempDirPath.toURI(), false);
+    Assert.assertEquals(fileMetadata.size(), count + 2);
+    Assert.assertEquals(fileMetadata.stream().filter(FileMetadata::isDirectory).count(), count + 1);
+    Assert.assertEquals(fileMetadata.stream().filter(f -> !f.isDirectory()).count(), 1);
+    Assert.assertTrue(expectedNonRecursive
+            .containsAll(fileMetadata.stream().map(FileMetadata::getFilePath).collect(Collectors.toSet())),
+        fileMetadata.toString());
+    fileMetadata = localPinotFS.listFilesWithMetadata(tempDirPath.toURI(), true);
+    Assert.assertEquals(fileMetadata.size(), count * 2 + 2);
+    Assert.assertEquals(fileMetadata.stream().filter(FileMetadata::isDirectory).count(), count + 1);
+    Assert.assertEquals(fileMetadata.stream().filter(f -> !f.isDirectory()).count(), count + 1);
+    Assert.assertTrue(
+        expectedRecursive.containsAll(fileMetadata.stream().map(FileMetadata::getFilePath).collect(Collectors.toSet())),
+        fileMetadata.toString());
   }
 }

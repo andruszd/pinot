@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.segment.local.segment.index.loader.defaultcolumn;
 
+import java.util.Map;
 import java.util.Set;
 import org.apache.pinot.segment.spi.creator.ColumnStatistics;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
@@ -34,7 +35,6 @@ public class DefaultColumnStatistics implements ColumnStatistics {
   private final boolean _isSorted;
   private final int _totalNumberOfEntries;
   private final int _maxNumberOfMultiValues;
-  private final boolean _hasNull = false;
 
   public DefaultColumnStatistics(Object minValue, Object maxValue, Object uniqueValuesSet, boolean isSorted,
       int totalNumberOfEntries, int maxNumberOfMultiValues) {
@@ -92,11 +92,6 @@ public class DefaultColumnStatistics implements ColumnStatistics {
   }
 
   @Override
-  public boolean hasNull() {
-    return _hasNull;
-  }
-
-  @Override
   public PartitionFunction getPartitionFunction() {
     return null;
   }
@@ -104,6 +99,11 @@ public class DefaultColumnStatistics implements ColumnStatistics {
   @Override
   public int getNumPartitions() {
     return 0;
+  }
+
+  @Override
+  public Map<String, String> getPartitionFunctionConfig() {
+    return null;
   }
 
   @Override

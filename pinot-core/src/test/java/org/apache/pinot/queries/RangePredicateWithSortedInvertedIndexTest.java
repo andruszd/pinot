@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.RandomStringUtils;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
 import org.apache.pinot.core.operator.query.SelectionOnlyOperator;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
@@ -161,9 +160,8 @@ public class RangePredicateWithSortedInvertedIndexTest extends BaseQueriesTest {
     // test with sorted column without dictionary
     // FilterOperatorUtils code should correctly create scan operator for INT_COL_RAW
     // else this test will fail
-    query =
-        "SELECT STRING_COL, INT_COL FROM testTable WHERE INT_COL >= 20000 AND INT_COL <= 23666 AND INT_COL_RAW <= "
-            + "23666 LIMIT 100000";
+    query = "SELECT STRING_COL, INT_COL FROM testTable WHERE INT_COL >= 20000 AND INT_COL <= 23666 AND "
+        + "INT_COL_RAW <= 23666 LIMIT 100000";
     pair = new Pairs.IntPair(20000, 23666);
     runQuery(query, 3667, Lists.newArrayList(pair), 2);
 
@@ -223,9 +221,8 @@ public class RangePredicateWithSortedInvertedIndexTest extends BaseQueriesTest {
   }
 
   private void runQuery(String query, int count, List<Pairs.IntPair> intPairs, int numColumns) {
-    SelectionOnlyOperator operator = getOperatorForPqlQuery(query);
-    IntermediateResultsBlock block = operator.nextBlock();
-    Collection<Object[]> rows = block.getSelectionResult();
+    SelectionOnlyOperator operator = getOperator(query);
+    Collection<Object[]> rows = operator.nextBlock().getRows();
     assertNotNull(rows, ERROR_MESSAGE);
     assertEquals(rows.size(), count, ERROR_MESSAGE);
     if (count > 0) {

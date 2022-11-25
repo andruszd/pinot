@@ -21,6 +21,8 @@ package org.apache.pinot.segment.spi.partition;
 import com.google.common.base.Preconditions;
 import java.util.Arrays;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 
 /**
  * Implementation of {@link Byte array partitioner}
@@ -40,8 +42,13 @@ public class ByteArrayPartitionFunction implements PartitionFunction {
   }
 
   @Override
-  public int getPartition(Object valueIn) {
-    return abs(Arrays.hashCode(valueIn.toString().getBytes())) % _numPartitions;
+  public int getPartition(Object value) {
+    return abs(Arrays.hashCode(value.toString().getBytes(UTF_8))) % _numPartitions;
+  }
+
+  @Override
+  public String getName() {
+    return NAME;
   }
 
   @Override
@@ -49,12 +56,14 @@ public class ByteArrayPartitionFunction implements PartitionFunction {
     return _numPartitions;
   }
 
+  // Keep it for backward-compatibility, use getName() instead
   @Override
   public String toString() {
     return NAME;
   }
 
-  private int abs(int n) {
+  // NOTE: This matches the Utils.abs() in Kafka
+  private static int abs(int n) {
     return (n == Integer.MIN_VALUE) ? 0 : Math.abs(n);
   }
 }

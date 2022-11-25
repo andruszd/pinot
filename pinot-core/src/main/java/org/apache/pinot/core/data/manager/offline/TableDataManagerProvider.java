@@ -20,17 +20,18 @@ package org.apache.pinot.core.data.manager.offline;
 
 import com.google.common.cache.LoadingCache;
 import java.util.concurrent.Semaphore;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.helix.HelixManager;
-import org.apache.helix.ZNRecord;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.common.restlet.resources.SegmentErrorInfo;
 import org.apache.pinot.core.data.manager.realtime.RealtimeTableDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManagerConfig;
+import org.apache.pinot.segment.local.data.manager.TableDataManagerParams;
 import org.apache.pinot.spi.config.instance.InstanceDataManagerConfig;
 import org.apache.pinot.spi.config.table.TableType;
-import org.apache.pinot.spi.utils.Pair;
 
 
 /**
@@ -38,6 +39,7 @@ import org.apache.pinot.spi.utils.Pair;
  */
 public class TableDataManagerProvider {
   private static Semaphore _segmentBuildSemaphore;
+  private static TableDataManagerParams _tableDataManagerParams;
 
   private TableDataManagerProvider() {
   }
@@ -47,6 +49,7 @@ public class TableDataManagerProvider {
     if (maxParallelBuilds > 0) {
       _segmentBuildSemaphore = new Semaphore(maxParallelBuilds, true);
     }
+    _tableDataManagerParams = new TableDataManagerParams(instanceDataManagerConfig);
   }
 
   public static TableDataManager getTableDataManager(TableDataManagerConfig tableDataManagerConfig, String instanceId,
@@ -67,7 +70,8 @@ public class TableDataManagerProvider {
       default:
         throw new IllegalStateException();
     }
-    tableDataManager.init(tableDataManagerConfig, instanceId, propertyStore, serverMetrics, helixManager, errorCache);
+    tableDataManager.init(tableDataManagerConfig, instanceId, propertyStore, serverMetrics, helixManager, errorCache,
+        _tableDataManagerParams);
     return tableDataManager;
   }
 }

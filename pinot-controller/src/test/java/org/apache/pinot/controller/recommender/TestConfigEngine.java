@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.controller.recommender;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.io.IOException;
 import java.net.URL;
@@ -40,6 +39,7 @@ import org.apache.pinot.controller.recommender.rules.io.configs.SegmentSizeRecom
 import org.apache.pinot.controller.recommender.rules.utils.FixedLenBitset;
 import org.apache.pinot.controller.recommender.rules.utils.QueryInvertedSortedIndexRecommender;
 import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
@@ -50,13 +50,13 @@ import static org.testng.Assert.*;
 
 
 public class TestConfigEngine {
+
   private static final Logger LOGGER = LoggerFactory.getLogger(TestConfigEngine.class);
-  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
   private InputManager _input;
 
   void loadInput(String fName)
       throws InvalidInputException, IOException {
-    _input = OBJECT_MAPPER.readValue(readInputToStr(fName), InputManager.class);
+    _input = JsonUtils.stringToObject(readInputToStr(fName), InputManager.class);
     _input.init();
   }
 
@@ -71,13 +71,11 @@ public class TestConfigEngine {
   void testInputManager()
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/SortedInvertedIndexInput.json");
-    assertEquals(_input.getSchema().getDimensionNames().toString(), "[a, b, c, d, e, f, g, h, i, j]");
-    assertEquals(_input.getOverWrittenConfigs().getIndexConfig().getInvertedIndexColumns().toString(),
-        "[a, b]");
-    assertEquals(_input.getBloomFilterRuleParams().getThresholdMinPercentEqBloomfilter().toString(),
-        "0.51");
+    assertEquals(_input.getSchema().getDimensionNames().toString(), "[a, b, c, d, e, f, g, h, i, j, ja, jb]");
+    assertEquals(_input.getOverWrittenConfigs().getIndexConfig().getInvertedIndexColumns().toString(), "[a, b]");
+    assertEquals(_input.getBloomFilterRuleParams().getThresholdMinPercentEqBloomfilter().toString(), "0.51");
     assertEquals(_input.getLatencySLA(), 500);
-    assertEquals(_input.getColNameToIntMap().size(), 17);
+    assertEquals(_input.getColNameToIntMap().size(), 19);
     assertEquals(_input.getFieldType("h"), FieldSpec.DataType.BYTES);
     assertEquals(_input.getFieldType("t"), FieldSpec.DataType.INT);
     assertEquals(_input.getCardinality("g"), 6, 0.00001);
@@ -87,6 +85,17 @@ public class TestConfigEngine {
     assertTrue(_input.isSingleValueColumn("j"));
     assertFalse(_input.isSingleValueColumn("i"));
     assertTrue(_input.getTimeColumns().contains("t"));
+  }
+
+  @Test
+  void testSupportsBooleanDataType()
+      throws InvalidInputException, IOException {
+    loadInput("recommenderInput/SortedInvertedIndexInput.json");
+    assertEquals(_input.getFieldType("ja"), FieldSpec.DataType.BOOLEAN);
+    assertEquals(_input.getFieldType("jb"), FieldSpec.DataType.BOOLEAN);
+    assertTrue(_input.isSingleValueColumn("ja"));
+    assertFalse(_input.isSingleValueColumn("jb"));
+    assertEquals(_input.getNumValuesPerEntry("jb"), 3, 0.00001);
   }
 
   @Test
@@ -124,6 +133,20 @@ public class TestConfigEngine {
   }
 
   @Test
+  void testInvalidColumnInFilterRule()
+      throws InvalidInputException, IOException {
+    loadInput("recommenderInput/InvalidColumnInFilterInput.json");
+    ConfigManager output = new ConfigManager();
+    AbstractRule abstractRule =
+        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.InvertedSortedIndexJointRule, _input, output);
+    abstractRule.run();
+    assertEquals(output.getIndexConfig().getInvertedIndexColumns().toString(), "[]");
+    assertEquals(_input.getOverWrittenConfigs().getFlaggedQueries().getFlaggedQueries().toString(),
+        "{select i from tableName where a = xyz and t > 500=ERROR: "
+            + "Query is filtering on columns not appearing in schema: [xyz]}");
+  }
+
+  @Test
   void testSortedInvertedIndexJointRuleWithMetricAndDateTimeColumn()
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/SortedInvertedIndexInputWithMetricAndDateTimeColumn.json");
@@ -157,15 +180,13 @@ public class TestConfigEngine {
       add("[[PredicateParseResult{dims{[3]}, AND, BITMAP, nESI=1.645, selected=0.034, nESIWithIdx=0.695}, "
           + "PredicateParseResult{dims{[2]},"
           + " AND, BITMAP, nESI=1.645, selected=0.034, nESIWithIdx=0.835}, PredicateParseResult{dims{[]}, AND, "
-          + "NESTED, nESI=1.645, "
-          + "selected=0.034, nESIWithIdx=1.645}]]");
+          + "NESTED, nESI=1.645, selected=0.034, nESIWithIdx=1.645}]]");
       add("[[PredicateParseResult{dims{[7]}, AND, BITMAP, nESI=0.150, selected=0.015, nESIWithIdx=0.058}, "
           + "PredicateParseResult{dims{[]}, "
           + "AND, NESTED, nESI=0.150, selected=0.015, nESIWithIdx=0.150}], [PredicateParseResult{dims{[5, 9]}, AND, "
           + "BITMAP, nESI=12.000, "
           + "selected=0.500, nESIWithIdx=4.000}, PredicateParseResult{dims{[]}, AND, NESTED, nESI=12.000, selected=0"
-          + ".500, nESIWithIdx=12"
-          + ".000}]]");
+          + ".500, nESIWithIdx=12.000}]]");
       add("[[PredicateParseResult{dims{[2, 4]}, AND, BITMAP, nESI=7.625, selected=0.023, nESIWithIdx=1.309}, "
           + "PredicateParseResult{dims{[]}, AND, NESTED, nESI=7.625, selected=0.023, nESIWithIdx=7.625}]]");
     }};
@@ -175,21 +196,16 @@ public class TestConfigEngine {
             + "and t > 500";
     String q2 =
         "select j from tableName where (a=3 and (h = 5 or f >34) and REGEXP_LIKE(i, 'as*')) or ((f = 3  or j in "
-            + "('#VALUES', 4)) and "
-            + "REGEXP_LIKE(d, 'fl*'))";
+            + "('#VALUES', 4)) and " + "REGEXP_LIKE(d, 'fl*'))";
     String q3 =
         "select f from tableName where (a=0 or (b=1 and (e in ('#VALUES',2) or c=7))) and TEXT_MATCH(d, 'dasd') and "
-            + "MAX(MAX(h,i),j)=4 and"
-            + " t<3";
-    assertTrue(results.contains(totalNESICounter
-        .parseQuery(_input.getQueryContext(q1), _input.getQueryWeight(q1))
-        .toString()));
-    assertTrue(results.contains(totalNESICounter
-        .parseQuery(_input.getQueryContext(q2), _input.getQueryWeight(q2))
-        .toString()));
-    assertTrue(results.contains(totalNESICounter
-        .parseQuery(_input.getQueryContext(q3), _input.getQueryWeight(q3))
-        .toString()));
+            + "MAX(MAX(h,i),j)=4 and" + " t<3";
+    assertTrue(results
+        .contains(totalNESICounter.parseQuery(_input.getQueryContext(q1), _input.getQueryWeight(q1)).toString()));
+    assertTrue(results
+        .contains(totalNESICounter.parseQuery(_input.getQueryContext(q2), _input.getQueryWeight(q2)).toString()));
+    assertTrue(results
+        .contains(totalNESICounter.parseQuery(_input.getQueryContext(q3), _input.getQueryWeight(q3)).toString()));
   }
 
   @Test(expectedExceptions = InvalidInputException.class)
@@ -209,8 +225,7 @@ public class TestConfigEngine {
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/FlagQueryInput.json");
     ConfigManager output = _input.getOverWrittenConfigs();
-    AbstractRule abstractRule =
-        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.FlagQueryRule, _input, output);
+    AbstractRule abstractRule = RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.FlagQueryRule, _input, output);
     abstractRule.run();
 
     assertFalse(output.getFlaggedQueries().getFlaggedQueries().containsKey("select f from tableName where x = 2"));
@@ -237,8 +252,7 @@ public class TestConfigEngine {
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/BloomFilterInput.json");
     ConfigManager output = new ConfigManager();
-    AbstractRule abstractRule =
-        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.BloomFilterRule, _input, output);
+    AbstractRule abstractRule = RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.BloomFilterRule, _input, output);
     abstractRule.run();
     assertEquals(output.getIndexConfig().getBloomFilterColumns().toString(), "[b, c, e]");
   }
@@ -248,8 +262,7 @@ public class TestConfigEngine {
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/BloomFilterInputWithDateTimeColumn.json");
     ConfigManager output = new ConfigManager();
-    AbstractRule abstractRule =
-        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.BloomFilterRule, _input, output);
+    AbstractRule abstractRule = RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.BloomFilterRule, _input, output);
     abstractRule.run();
     assertEquals(output.getIndexConfig().getBloomFilterColumns().toString(), "[b, t, x]");
   }
@@ -259,8 +272,7 @@ public class TestConfigEngine {
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/RangeIndexInput.json");
     ConfigManager output = new ConfigManager();
-    AbstractRule abstractRule =
-        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.RangeIndexRule, _input, output);
+    AbstractRule abstractRule = RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.RangeIndexRule, _input, output);
     abstractRule.run();
     // Although column i has highest weight, it being string column, range index recommender will skip it and select
     // next winner
@@ -269,13 +281,24 @@ public class TestConfigEngine {
     assertEquals(output.getIndexConfig().getRangeIndexColumns().toString(), "[t, j]");
   }
 
+  /** Verifiy rule that recommends JsonIndex and NoDictionary on JSON columns. */
+  @Test
+  void testJsonIndexRule()
+      throws InvalidInputException, IOException {
+    loadInput("recommenderInput/SegmentSizeRuleInput.json");
+    ConfigManager output = new ConfigManager();
+    AbstractRule abstractRule = RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.JsonIndexRule, _input, output);
+    abstractRule.run();
+    assertEquals(output.getIndexConfig().getJsonIndexColumns().toString(), "[q]");
+    assertEquals(output.getIndexConfig().getNoDictionaryColumns().toString(), "[q]");
+  }
+
   @Test
   void testNoDictionaryOnHeapDictionaryJointRule()
       throws InvalidInputException, IOException {
     loadInput("recommenderInput/NoDictionaryOnHeapDictionaryJointRuleInput.json");
     AbstractRule abstractRule = RulesToExecute.RuleFactory
-        .getRule(RulesToExecute.Rule.NoDictionaryOnHeapDictionaryJointRule, _input,
-            _input._overWrittenConfigs);
+        .getRule(RulesToExecute.Rule.NoDictionaryOnHeapDictionaryJointRule, _input, _input._overWrittenConfigs);
     abstractRule.run();
     assertEquals(_input._overWrittenConfigs.getIndexConfig().getNoDictionaryColumns().toString(),
         "[p, t, h, j, l, m, n, o]");
@@ -290,8 +313,8 @@ public class TestConfigEngine {
     _input._overWrittenConfigs.setSegmentSizeRecommendations(
         new SegmentSizeRecommendations(/*numRows=*/1_000_000, /*numSegments=*/4, /*segmentSize=*/1_000_000));
 
-    AbstractRule abstractRule = RulesToExecute.RuleFactory
-        .getRule(RulesToExecute.Rule.KafkaPartitionRule, _input, _input._overWrittenConfigs);
+    AbstractRule abstractRule =
+        RulesToExecute.RuleFactory.getRule(RulesToExecute.Rule.KafkaPartitionRule, _input, _input._overWrittenConfigs);
     abstractRule.run();
     abstractRule = RulesToExecute.RuleFactory
         .getRule(RulesToExecute.Rule.PinotTablePartitionRule, _input, _input._overWrittenConfigs);
@@ -434,7 +457,8 @@ public class TestConfigEngine {
   }
 
   @Test
-  void testRealtimeProvisioningRuleWithHighIngestionRate() throws Exception {
+  void testRealtimeProvisioningRuleWithHighIngestionRate()
+      throws Exception {
     // Total memory for some of the options are greater than the provided max memory in a host.
     // For those option, the returned values is "NA"
     testRealtimeProvisioningRule("recommenderInput/RealtimeProvisioningInput_highIngestionRate.json");
@@ -452,8 +476,8 @@ public class TestConfigEngine {
       throws Exception {
     ConfigManager output = runRecommenderDriver("recommenderInput/SegmentSizeRuleInput.json");
     SegmentSizeRecommendations segmentSizeRecommendations = output.getSegmentSizeRecommendations();
-    assertEquals(segmentSizeRecommendations.getNumSegments(), 2);
-    assertEquals(segmentSizeRecommendations.getNumRowsPerSegment(), 50_000);
+    assertEquals(segmentSizeRecommendations.getNumSegments(), 3);
+    assertEquals(segmentSizeRecommendations.getNumRowsPerSegment(), 33_333);
   }
 
   @Test
@@ -478,8 +502,7 @@ public class TestConfigEngine {
   @Test
   void testSegmentSizeRuleRealtimeOnlyTable()
       throws Exception {
-    ConfigManager output =
-        runRecommenderDriver("recommenderInput/SegmentSizeRuleInput_realtimeOnlyTable.json");
+    ConfigManager output = runRecommenderDriver("recommenderInput/SegmentSizeRuleInput_realtimeOnlyTable.json");
     assertEquals(output.getSegmentSizeRecommendations().getMessage(),
         "Segment sizing for realtime-only tables is done via Realtime Provisioning Rule");
     assertEquals(output.getSegmentSizeRecommendations().getNumSegments(), 0);
@@ -502,7 +525,7 @@ public class TestConfigEngine {
       throws IOException, InvalidInputException {
     String input = readInputToStr(fileName);
     String output = RecommenderDriver.run(input);
-    return OBJECT_MAPPER.readValue(output, ConfigManager.class);
+    return JsonUtils.stringToObject(output, ConfigManager.class);
   }
 
   private void assertRealtimeProvisioningRecommendation(Map<String, String> matrix) {

@@ -21,15 +21,12 @@ package org.apache.pinot.common.metadata.segment;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
-import org.apache.helix.ZNRecord;
+import org.apache.commons.collections.MapUtils;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metadata.ZKMetadata;
 import org.apache.pinot.spi.utils.CommonConstants.Segment;
 import org.apache.pinot.spi.utils.CommonConstants.Segment.Realtime.Status;
-import org.apache.pinot.spi.utils.CommonConstants.Segment.SegmentType;
 import org.apache.pinot.spi.utils.JsonUtils;
-import org.apache.pinot.spi.utils.builder.TableNameBuilder;
-import org.joda.time.Duration;
-import org.joda.time.Interval;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,8 +47,6 @@ public class SegmentZKMetadata implements ZKMetadata {
   public SegmentZKMetadata(String segmentName) {
     _znRecord = new ZNRecord(segmentName);
     _simpleFields = _znRecord.getSimpleFields();
-    // TODO: Remove this field after releasing 0.9.0
-    _simpleFields.put(Segment.SEGMENT_NAME, segmentName);
   }
 
   public SegmentZKMetadata(ZNRecord znRecord) {
@@ -99,6 +94,14 @@ public class SegmentZKMetadata implements ZKMetadata {
     return _endTimeMs;
   }
 
+  public String getRawStartTime() {
+    return _simpleFields.get(Segment.RAW_START_TIME);
+  }
+
+  public String getRawEndTime() {
+    return _simpleFields.get(Segment.RAW_END_TIME);
+  }
+
   public void setStartTime(long startTime) {
     setNonNegativeValue(Segment.START_TIME, startTime);
     _startTimeMsCached = false;
@@ -107,6 +110,14 @@ public class SegmentZKMetadata implements ZKMetadata {
   public void setEndTime(long endTime) {
     setNonNegativeValue(Segment.END_TIME, endTime);
     _endTimeMsCached = false;
+  }
+
+  public void setRawStartTime(String startTime) {
+    setValue(Segment.RAW_START_TIME, startTime);
+  }
+
+  public void setRawEndTime(String endTime) {
+    setValue(Segment.RAW_END_TIME, endTime);
   }
 
   public void setTimeUnit(TimeUnit timeUnit) {
@@ -131,12 +142,28 @@ public class SegmentZKMetadata implements ZKMetadata {
     setNonNegativeValue(Segment.TOTAL_DOCS, totalDocs);
   }
 
+  public void setSizeInBytes(long sizeInBytes) {
+    setNonNegativeValue(Segment.SIZE_IN_BYTES, sizeInBytes);
+  }
+
+  public long getSizeInBytes() {
+    return _znRecord.getLongField(Segment.SIZE_IN_BYTES, -1);
+  }
+
   public long getCrc() {
     return _znRecord.getLongField(Segment.CRC, -1);
   }
 
   public void setCrc(long crc) {
     setNonNegativeValue(Segment.CRC, crc);
+  }
+
+  public String getTier() {
+    return _simpleFields.get(Segment.TIER);
+  }
+
+  public void setTier(String tier) {
+    setValue(Segment.TIER, tier);
   }
 
   public long getCreationTime() {
@@ -158,8 +185,7 @@ public class SegmentZKMetadata implements ZKMetadata {
   }
 
   public void setPushTime(long pushTime) {
-    // TODO: Replace with new push time key after releasing 0.9.0
-    setNonNegativeValue(Segment.Offline.PUSH_TIME, pushTime);
+    setNonNegativeValue(Segment.PUSH_TIME, pushTime);
   }
 
   public long getRefreshTime() {
@@ -173,8 +199,7 @@ public class SegmentZKMetadata implements ZKMetadata {
   }
 
   public void setRefreshTime(long pushTime) {
-    // TODO: Replace with new refresh time key after releasing 0.9.0
-    setNonNegativeValue(Segment.Offline.REFRESH_TIME, pushTime);
+    setNonNegativeValue(Segment.REFRESH_TIME, pushTime);
   }
 
   public String getDownloadUrl() {
@@ -190,12 +215,7 @@ public class SegmentZKMetadata implements ZKMetadata {
   }
 
   public void setDownloadUrl(String downloadUrl) {
-    // TODO: Replace with new download url key after releasing 0.9.0
-    if (SegmentType.REALTIME.name().equals(_simpleFields.get(Segment.SEGMENT_TYPE))) {
-      setValue(Segment.Realtime.DOWNLOAD_URL, downloadUrl);
-    } else {
-      setValue(Segment.Offline.DOWNLOAD_URL, downloadUrl);
-    }
+    setValue(Segment.DOWNLOAD_URL, downloadUrl);
   }
 
   public String getCrypterName() {
@@ -236,7 +256,7 @@ public class SegmentZKMetadata implements ZKMetadata {
 
   public void setCustomMap(Map<String, String> customMap) {
     Map<String, Map<String, String>> mapFields = _znRecord.getMapFields();
-    if (customMap != null) {
+    if (MapUtils.isNotEmpty(customMap)) {
       mapFields.put(Segment.CUSTOM_MAP, customMap);
     } else {
       mapFields.remove(Segment.CUSTOM_MAP);
@@ -362,69 +382,5 @@ public class SegmentZKMetadata implements ZKMetadata {
   @Override
   public int hashCode() {
     return toMap().hashCode();
-  }
-
-  // TODO: Remove all deprecated fields after releasing 0.9.0
-  @Deprecated
-  public String getTableName() {
-    String tableName = _simpleFields.get(Segment.TABLE_NAME);
-    return tableName != null ? TableNameBuilder.extractRawTableName(tableName) : null;
-  }
-
-  @Deprecated
-  public void setTableName(String tableName) {
-    if (tableName != null) {
-      _simpleFields.put(Segment.TABLE_NAME, TableNameBuilder.extractRawTableName(tableName));
-    } else {
-      _simpleFields.remove(Segment.TABLE_NAME);
-    }
-  }
-
-  @Deprecated
-  public SegmentType getSegmentType() {
-    return _znRecord.getEnumField(Segment.SEGMENT_TYPE, SegmentType.class, SegmentType.OFFLINE);
-  }
-
-  @Deprecated
-  public void setSegmentType(SegmentType segmentType) {
-    setValue(Segment.SEGMENT_TYPE, segmentType);
-  }
-
-  @Deprecated
-  public long getStartTime() {
-    return _znRecord.getLongField(Segment.START_TIME, -1);
-  }
-
-  @Deprecated
-  public long getEndTime() {
-    return _znRecord.getLongField(Segment.END_TIME, -1);
-  }
-
-  @Deprecated
-  public TimeUnit getTimeUnit() {
-    String timeUnitString = _simpleFields.get(Segment.TIME_UNIT);
-    // Check "null" for backward-compatibility
-    if (timeUnitString != null && !timeUnitString.equals(NULL)) {
-      return TimeUnit.valueOf(timeUnitString);
-    } else {
-      return null;
-    }
-  }
-
-  @Deprecated
-  public Duration getTimeGranularity() {
-    TimeUnit timeUnit = getTimeUnit();
-    return timeUnit != null ? new Duration(timeUnit.toMillis(1)) : null;
-  }
-
-  @Deprecated
-  public Interval getTimeInterval() {
-    long startTimeMs = getStartTimeMs();
-    long endTimeMs = getEndTimeMs();
-    if (startTimeMs > 0 && endTimeMs > 0) {
-      return new Interval(startTimeMs, endTimeMs);
-    } else {
-      return null;
-    }
   }
 }

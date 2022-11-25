@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.local.segment.index.readers;
 
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
@@ -34,7 +35,7 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  * </ul>
  * <p>This helps avoid creation of Long from byte[].
  */
-public class OnHeapLongDictionary extends OnHeapDictionary {
+public class OnHeapLongDictionary extends BaseImmutableDictionary {
   private final Long2IntOpenHashMap _valToDictId;
   private final long[] _dictIdToVal;
 
@@ -60,13 +61,6 @@ public class OnHeapLongDictionary extends OnHeapDictionary {
   }
 
   @Override
-  public int insertionIndexOf(String stringValue) {
-    long longValue = Long.parseLong(stringValue);
-    int index = _valToDictId.get(longValue);
-    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, longValue);
-  }
-
-  @Override
   public DataType getValueType() {
     return DataType.LONG;
   }
@@ -74,6 +68,18 @@ public class OnHeapLongDictionary extends OnHeapDictionary {
   @Override
   public int indexOf(String stringValue) {
     return _valToDictId.get(Long.parseLong(stringValue));
+  }
+
+  @Override
+  public int indexOf(long longValue) {
+    return _valToDictId.get(longValue);
+  }
+
+  @Override
+  public int insertionIndexOf(String stringValue) {
+    long longValue = Long.parseLong(stringValue);
+    int index = _valToDictId.get(longValue);
+    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, longValue);
   }
 
   @Override
@@ -99,6 +105,11 @@ public class OnHeapLongDictionary extends OnHeapDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return _dictIdToVal[dictId];
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(_dictIdToVal[dictId]);
   }
 
   @Override

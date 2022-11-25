@@ -24,9 +24,10 @@ import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.helix.HelixManager;
-import org.apache.helix.ZNRecord;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.common.restlet.resources.SegmentErrorInfo;
@@ -35,7 +36,6 @@ import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.utils.Pair;
 
 
 /**
@@ -49,7 +49,7 @@ public interface TableDataManager {
    */
   void init(TableDataManagerConfig tableDataManagerConfig, String instanceId,
       ZkHelixPropertyStore<ZNRecord> propertyStore, ServerMetrics serverMetrics, HelixManager helixManager,
-      LoadingCache<Pair<String, String>, SegmentErrorInfo> errorCache);
+      LoadingCache<Pair<String, String>, SegmentErrorInfo> errorCache, TableDataManagerParams tableDataManagerParams);
 
   /**
    * Starts the table data manager. Should be called only once after table data manager gets initialized but before
@@ -86,6 +86,17 @@ public interface TableDataManager {
    * A new segment may be downloaded if the local one has a different CRC; or can be forced to download
    * if forceDownload flag is true. This operation is conducted within a failure handling framework
    * and made transparent to ongoing queries, because the segment is in online serving state.
+   *
+   * TODO: Clean up this method to use the schema from the IndexLoadingConfig
+   *
+   * @param segmentName the segment to reload
+   * @param indexLoadingConfig the latest table config to load segment
+   * @param zkMetadata the segment metadata from zookeeper
+   * @param localMetadata the segment metadata object held by server right now,
+   *                      which must not be null to reload the segment
+   * @param schema the latest table schema to load segment
+   * @param forceDownload whether to force to download raw segment to reload
+   * @throws Exception thrown upon failure when to reload the segment
    */
   void reloadSegment(String segmentName, IndexLoadingConfig indexLoadingConfig, SegmentZKMetadata zkMetadata,
       SegmentMetadata localMetadata, @Nullable Schema schema, boolean forceDownload)
@@ -97,6 +108,13 @@ public interface TableDataManager {
    * This operation is conducted outside the failure handling framework as used in segment reloading,
    * because the segment is not yet online serving queries, e.g. this method is used to add a new segment,
    * or transition a segment to online serving state.
+   *
+   * @param segmentName the segment to add or replace
+   * @param indexLoadingConfig the latest table config to load segment
+   * @param zkMetadata the segment metadata from zookeeper
+   * @param localMetadata the segment metadata object held by server, which can be null when
+   *                      the server is restarted or the segment is newly added to the table
+   * @throws Exception thrown upon failure when to add or replace the segment
    */
   void addOrReplaceSegment(String segmentName, IndexLoadingConfig indexLoadingConfig, SegmentZKMetadata zkMetadata,
       @Nullable SegmentMetadata localMetadata)
@@ -106,6 +124,11 @@ public interface TableDataManager {
    * Removes a segment from the table.
    */
   void removeSegment(String segmentName);
+
+  /**
+   * Returns true if the segment was deleted in the last few minutes.
+   */
+  boolean isSegmentDeletedRecently(String segmentName);
 
   /**
    * Acquires all segments of the table.
@@ -118,6 +141,8 @@ public interface TableDataManager {
   /**
    * Acquires the segments with the given segment names.
    * <p>It is the caller's responsibility to return the segments by calling {@link #releaseSegment(SegmentDataManager)}.
+   * This method may return some recently deleted segments in missingSegments. The caller can identify those segments
+   * by using {@link #isSegmentDeletedRecently(String)}.
    *
    * @param segmentNames List of names of the segment to acquire
    * @param missingSegments Holder for segments unable to be acquired

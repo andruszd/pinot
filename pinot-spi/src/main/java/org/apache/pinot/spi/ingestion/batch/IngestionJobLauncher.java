@@ -23,7 +23,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.StringWriter;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -51,7 +50,7 @@ public class IngestionJobLauncher {
   public static final String YAML = "yaml";
 
   public static SegmentGenerationJobSpec getSegmentGenerationJobSpec(String jobSpecFilePath, String propertyFilePath,
-      Map<String, Object> context) {
+      Map<String, Object> context, Map<String, String> environmentValues) {
     Properties properties = new Properties();
     if (propertyFilePath != null) {
       try {
@@ -62,6 +61,13 @@ public class IngestionJobLauncher {
       }
     }
     Map<String, Object> propertiesMap = (Map) properties;
+    if (environmentValues != null) {
+      for (String propertyName: propertiesMap.keySet()) {
+        if (environmentValues.get(propertyName) != null) {
+          propertiesMap.put(propertyName, environmentValues.get(propertyName));
+        }
+      }
+    }
     if (context != null) {
       propertiesMap.putAll(context);
     }
@@ -95,9 +101,7 @@ public class IngestionJobLauncher {
   }
 
   public static void runIngestionJob(SegmentGenerationJobSpec spec) {
-    StringWriter sw = new StringWriter();
-    new Yaml().dump(spec, sw);
-    LOGGER.info("SegmentGenerationJobSpec: \n{}", sw.toString());
+    LOGGER.info("SegmentGenerationJobSpec: \n{}", spec.toJSONString(true));
     ExecutionFrameworkSpec executionFramework = spec.getExecutionFrameworkSpec();
     PinotIngestionJobType jobType = PinotIngestionJobType.fromString(spec.getJobType());
     switch (jobType) {

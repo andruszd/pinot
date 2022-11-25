@@ -20,6 +20,7 @@ package org.apache.pinot.integration.tests;
 
 import com.google.common.base.Function;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Connection;
@@ -34,12 +35,14 @@ import java.util.Properties;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.client.ConnectionFactory;
-import org.apache.pinot.client.Request;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
 import org.apache.pinot.common.utils.config.TagNameUtils;
 import org.apache.pinot.plugin.stream.kafka.KafkaStreamConfigProperties;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
+import org.apache.pinot.spi.config.table.DedupConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.HashFunction;
+import org.apache.pinot.spi.config.table.QueryConfig;
 import org.apache.pinot.spi.config.table.ReplicaGroupStrategyConfig;
 import org.apache.pinot.spi.config.table.RoutingConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
@@ -52,7 +55,9 @@ import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.apache.pinot.spi.stream.StreamDataServerStartable;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.tools.utils.KafkaStarterUtils;
 import org.apache.pinot.util.TestUtils;
 import org.testng.Assert;
@@ -128,7 +133,7 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
   }
 
   protected boolean useLlc() {
-    return false;
+    return true;
   }
 
   protected boolean useKafkaTransaction() {
@@ -257,8 +262,18 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
     return null;
   }
 
+  protected QueryConfig getQueryconfig() {
+    // Enable groovy for tables used in the tests
+    return new QueryConfig(null, false, null, null);
+  }
+
   protected boolean getNullHandlingEnabled() {
     return DEFAULT_NULL_HANDLING_ENABLED;
+  }
+
+  @Nullable
+  protected SegmentPartitionConfig getSegmentPartitionConfig() {
+    return null;
   }
 
   /**
@@ -274,7 +289,7 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
     InputStream inputStream =
         BaseClusterIntegrationTest.class.getClassLoader().getResourceAsStream(getSchemaFileName());
     Assert.assertNotNull(inputStream);
-    return Schema.fromInputSteam(inputStream);
+    return Schema.fromInputStream(inputStream);
   }
 
   /**
@@ -282,6 +297,20 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
    */
   protected Schema getSchema() {
     return getSchema(getSchemaName());
+  }
+
+  protected Schema createSchema(File schemaFile)
+      throws IOException {
+    InputStream inputStream = new FileInputStream(schemaFile);
+    Assert.assertNotNull(inputStream);
+    return JsonUtils.inputStreamToObject(inputStream, Schema.class);
+  }
+
+  protected TableConfig createTableConfig(File tableConfigFile)
+      throws IOException {
+    InputStream inputStream = new FileInputStream(tableConfigFile);
+    Assert.assertNotNull(inputStream);
+    return JsonUtils.inputStreamToObject(inputStream, TableConfig.class);
   }
 
   /**
@@ -294,8 +323,9 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
         .setRangeIndexColumns(getRangeIndexColumns()).setBloomFilterColumns(getBloomFilterColumns())
         .setFieldConfigList(getFieldConfigs()).setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion())
         .setLoadMode(getLoadMode()).setTaskConfig(getTaskConfig()).setBrokerTenant(getBrokerTenant())
-        .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig())
-        .setNullHandlingEnabled(getNullHandlingEnabled()).build();
+        .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig()).setQueryConfig(getQueryconfig())
+        .setNullHandlingEnabled(getNullHandlingEnabled()).setSegmentPartitionConfig(getSegmentPartitionConfig())
+        .build();
   }
 
   /**
@@ -316,42 +346,40 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
     boolean useLlc = useLlc();
     if (useLlc) {
       // LLC
-      streamConfigMap
-          .put(StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_TYPES),
-              StreamConfig.ConsumerType.LOWLEVEL.toString());
-      streamConfigMap.put(KafkaStreamConfigProperties
-              .constructStreamProperty(KafkaStreamConfigProperties.LowLevelConsumer.KAFKA_BROKER_LIST),
+      streamConfigMap.put(
+          StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_TYPES),
+          StreamConfig.ConsumerType.LOWLEVEL.toString());
+      streamConfigMap.put(KafkaStreamConfigProperties.constructStreamProperty(
+              KafkaStreamConfigProperties.LowLevelConsumer.KAFKA_BROKER_LIST),
           "localhost:" + _kafkaStarters.get(0).getPort());
       if (useKafkaTransaction()) {
-        streamConfigMap.put(KafkaStreamConfigProperties
-                .constructStreamProperty(KafkaStreamConfigProperties.LowLevelConsumer.KAFKA_ISOLATION_LEVEL),
+        streamConfigMap.put(KafkaStreamConfigProperties.constructStreamProperty(
+                KafkaStreamConfigProperties.LowLevelConsumer.KAFKA_ISOLATION_LEVEL),
             KafkaStreamConfigProperties.LowLevelConsumer.KAFKA_ISOLATION_LEVEL_READ_COMMITTED);
       }
     } else {
       // HLC
-      streamConfigMap
-          .put(StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_TYPES),
-              StreamConfig.ConsumerType.HIGHLEVEL.toString());
-      streamConfigMap.put(KafkaStreamConfigProperties
-              .constructStreamProperty(KafkaStreamConfigProperties.HighLevelConsumer.KAFKA_HLC_ZK_CONNECTION_STRING),
-          getKafkaZKAddress());
-      streamConfigMap.put(KafkaStreamConfigProperties
-              .constructStreamProperty(KafkaStreamConfigProperties.HighLevelConsumer.KAFKA_HLC_BOOTSTRAP_SERVER),
+      streamConfigMap.put(
+          StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_TYPES),
+          StreamConfig.ConsumerType.HIGHLEVEL.toString());
+      streamConfigMap.put(KafkaStreamConfigProperties.constructStreamProperty(
+          KafkaStreamConfigProperties.HighLevelConsumer.KAFKA_HLC_ZK_CONNECTION_STRING), getKafkaZKAddress());
+      streamConfigMap.put(KafkaStreamConfigProperties.constructStreamProperty(
+              KafkaStreamConfigProperties.HighLevelConsumer.KAFKA_HLC_BOOTSTRAP_SERVER),
           "localhost:" + _kafkaStarters.get(0).getPort());
     }
-    streamConfigMap.put(StreamConfigProperties
-            .constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_FACTORY_CLASS),
-        getStreamConsumerFactoryClassName());
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_TOPIC_NAME),
-            getKafkaTopic());
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_DECODER_CLASS),
-            AvroFileSchemaKafkaAvroMessageDecoder.class.getName());
-    streamConfigMap
-        .put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, Integer.toString(getRealtimeSegmentFlushSize()));
-    streamConfigMap.put(StreamConfigProperties
-        .constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_OFFSET_CRITERIA), "smallest");
+    streamConfigMap.put(StreamConfigProperties.constructStreamProperty(streamType,
+        StreamConfigProperties.STREAM_CONSUMER_FACTORY_CLASS), getStreamConsumerFactoryClassName());
+    streamConfigMap.put(
+        StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_TOPIC_NAME),
+        getKafkaTopic());
+    streamConfigMap.put(
+        StreamConfigProperties.constructStreamProperty(streamType, StreamConfigProperties.STREAM_DECODER_CLASS),
+        AvroFileSchemaKafkaAvroMessageDecoder.class.getName());
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS,
+        Integer.toString(getRealtimeSegmentFlushSize()));
+    streamConfigMap.put(StreamConfigProperties.constructStreamProperty(streamType,
+        StreamConfigProperties.STREAM_CONSUMER_OFFSET_CRITERIA), "smallest");
     return streamConfigMap;
   }
 
@@ -366,8 +394,8 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
         .setRangeIndexColumns(getRangeIndexColumns()).setBloomFilterColumns(getBloomFilterColumns())
         .setFieldConfigList(getFieldConfigs()).setNumReplicas(getNumReplicas()).setSegmentVersion(getSegmentVersion())
         .setLoadMode(getLoadMode()).setTaskConfig(getTaskConfig()).setBrokerTenant(getBrokerTenant())
-        .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig()).setLLC(useLlc())
-        .setStreamConfigs(getStreamConfigs()).setNullHandlingEnabled(getNullHandlingEnabled()).build();
+        .setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig()).setQueryConfig(getQueryconfig())
+        .setLLC(useLlc()).setStreamConfigs(getStreamConfigs()).setNullHandlingEnabled(getNullHandlingEnabled()).build();
   }
 
   /**
@@ -386,7 +414,26 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
         .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
         .setSegmentPartitionConfig(new SegmentPartitionConfig(columnPartitionConfigMap))
         .setReplicaGroupStrategyConfig(new ReplicaGroupStrategyConfig(primaryKeyColumn, 1))
-        .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL, null, null, null)).build();
+        .setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).build();
+  }
+
+  /**
+   * Creates a new Dedup enabled table config
+   */
+  protected TableConfig createDedupTableConfig(File sampleAvroFile, String primaryKeyColumn, int numPartitions) {
+    AvroFileSchemaKafkaAvroMessageDecoder._avroFile = sampleAvroFile;
+    Map<String, ColumnPartitionConfig> columnPartitionConfigMap = new HashMap<>();
+    columnPartitionConfigMap.put(primaryKeyColumn, new ColumnPartitionConfig("Murmur", numPartitions));
+
+    return new TableConfigBuilder(TableType.REALTIME).setTableName(getTableName()).setSchemaName(getSchemaName())
+        .setTimeColumnName(getTimeColumnName()).setFieldConfigList(getFieldConfigs()).setNumReplicas(getNumReplicas())
+        .setSegmentVersion(getSegmentVersion()).setLoadMode(getLoadMode()).setTaskConfig(getTaskConfig())
+        .setBrokerTenant(getBrokerTenant()).setServerTenant(getServerTenant()).setIngestionConfig(getIngestionConfig())
+        .setLLC(useLlc()).setStreamConfigs(getStreamConfigs()).setNullHandlingEnabled(getNullHandlingEnabled())
+        .setRoutingConfig(new RoutingConfig(null, null, RoutingConfig.STRICT_REPLICA_GROUP_INSTANCE_SELECTOR_TYPE))
+        .setSegmentPartitionConfig(new SegmentPartitionConfig(columnPartitionConfigMap))
+        .setReplicaGroupStrategyConfig(new ReplicaGroupStrategyConfig(primaryKeyColumn, 1))
+        .setDedupConfig(new DedupConfig(true, HashFunction.NONE)).build();
   }
 
   /**
@@ -429,13 +476,21 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
   }
 
   /**
-   * Sets up the H2 connection to a table with pre-loaded data.
+   * Sets up the H2 connection
    */
-  protected void setUpH2Connection(List<File> avroFiles)
+  protected void setUpH2Connection()
       throws Exception {
     Assert.assertNull(_h2Connection);
     Class.forName("org.h2.Driver");
     _h2Connection = DriverManager.getConnection("jdbc:h2:mem:");
+  }
+
+  /**
+   * Sets up the H2 connection to a table with pre-loaded data.
+   */
+  protected void setUpH2Connection(List<File> avroFiles)
+      throws Exception {
+    setUpH2Connection();
     ClusterIntegrationTestUtils.setUpH2TableWithAvro(avroFiles, getTableName(), _h2Connection);
   }
 
@@ -471,9 +526,12 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
   protected void pushAvroIntoKafka(List<File> avroFiles)
       throws Exception {
 
-    ClusterIntegrationTestUtils
-        .pushAvroIntoKafka(avroFiles, "localhost:" + getKafkaPort(), getKafkaTopic(), getMaxNumKafkaMessagesPerBatch(),
-            getKafkaMessageHeader(), getPartitionColumn());
+    ClusterIntegrationTestUtils.pushAvroIntoKafka(avroFiles, "localhost:" + getKafkaPort(), getKafkaTopic(),
+        getMaxNumKafkaMessagesPerBatch(), getKafkaMessageHeader(), getPartitionColumn(), injectTombstones());
+  }
+
+  protected boolean injectTombstones() {
+    return false;
   }
 
   protected List<File> getAllAvroFiles()
@@ -528,12 +586,13 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
    * Get current result for "SELECT COUNT(*)".
    *
    * @return Current count start result
-   * @throws Exception
    */
-  protected long getCurrentCountStarResult()
-      throws Exception {
-    return getPinotConnection().execute(new Request("sql", "SELECT COUNT(*) FROM " + getTableName())).getResultSet(0)
-        .getLong(0);
+  protected long getCurrentCountStarResult() {
+    return getCurrentCountStarResult(getTableName());
+  }
+
+  protected long getCurrentCountStarResult(String tableName) {
+    return getPinotConnection().execute("SELECT COUNT(*) FROM " + tableName).getResultSet(0).getLong(0);
   }
 
   /**
@@ -563,28 +622,28 @@ public abstract class BaseClusterIntegrationTest extends ClusterTest {
   }
 
   /**
-   * Run equivalent Pinot and H2 query and compare the results.
-   *
-   * @param pqlQuery Pinot query
-   * @param sqlQueries H2 query
-   * @throws Exception
+   * Reset table utils.
    */
-  protected void testQuery(String pqlQuery, @Nullable List<String> sqlQueries)
-      throws Exception {
-    ClusterIntegrationTestUtils
-        .testPqlQuery(pqlQuery, _brokerBaseApiUrl, getPinotConnection(), sqlQueries, getH2Connection());
+  protected void resetTable(String tableName, TableType tableType, @Nullable String targetInstance)
+      throws IOException {
+    getControllerRequestClient().resetTable(TableNameBuilder.forType(tableType).tableNameWithType(tableName),
+        targetInstance);
   }
 
   /**
-   * Run equivalent Pinot SQL and H2 query and compare the results.
-   *
-   * @param pinotQuery Pinot query
-   * @param sqlQueries H2 query
-   * @throws Exception
+   * Run equivalent Pinot and H2 query and compare the results.
    */
-  protected void testSqlQuery(String pinotQuery, @Nullable List<String> sqlQueries)
+  protected void testQuery(String query)
       throws Exception {
-    ClusterIntegrationTestUtils
-        .testSqlQuery(pinotQuery, _brokerBaseApiUrl, getPinotConnection(), sqlQueries, getH2Connection());
+    testQuery(query, query);
+  }
+
+  /**
+   * Run equivalent Pinot and H2 query and compare the results.
+   */
+  protected void testQuery(String pinotQuery, String h2Query)
+      throws Exception {
+    ClusterIntegrationTestUtils.testQuery(pinotQuery, _brokerBaseApiUrl, getPinotConnection(), h2Query,
+        getH2Connection());
   }
 }

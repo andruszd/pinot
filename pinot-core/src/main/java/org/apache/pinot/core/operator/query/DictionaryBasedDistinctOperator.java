@@ -24,11 +24,11 @@ import java.util.List;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.data.table.Record;
 import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.core.operator.ExecutionStatistics;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
-import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
+import org.apache.pinot.core.operator.blocks.results.DistinctResultsBlock;
 import org.apache.pinot.core.query.aggregation.function.DistinctAggregationFunction;
 import org.apache.pinot.core.query.distinct.DistinctTable;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
@@ -39,12 +39,13 @@ import org.apache.pinot.spi.data.FieldSpec;
 /**
  * Operator which executes DISTINCT operation based on dictionary
  */
-public class DictionaryBasedDistinctOperator extends BaseOperator<IntermediateResultsBlock> {
-  private static final String OPERATOR_NAME = "DictionaryBasedDistinctOperator";
+public class DictionaryBasedDistinctOperator extends BaseOperator<DistinctResultsBlock> {
+  private static final String EXPLAIN_NAME = "DISTINCT_DICTIONARY";
 
   private final DistinctAggregationFunction _distinctAggregationFunction;
   private final Dictionary _dictionary;
   private final int _numTotalDocs;
+  private final boolean _nullHandlingEnabled;
   private final FieldSpec.DataType _dataType;
 
   private boolean _hasOrderBy;
@@ -52,29 +53,25 @@ public class DictionaryBasedDistinctOperator extends BaseOperator<IntermediateRe
   private int _numDocsScanned;
 
   public DictionaryBasedDistinctOperator(FieldSpec.DataType dataType,
-      DistinctAggregationFunction distinctAggregationFunction, Dictionary dictionary, int numTotalDocs) {
-
+      DistinctAggregationFunction distinctAggregationFunction, Dictionary dictionary, int numTotalDocs,
+      boolean nullHandlingEnabled) {
     _dataType = dataType;
     _distinctAggregationFunction = distinctAggregationFunction;
     _dictionary = dictionary;
     _numTotalDocs = numTotalDocs;
+    _nullHandlingEnabled = nullHandlingEnabled;
 
     List<OrderByExpressionContext> orderByExpressionContexts = _distinctAggregationFunction.getOrderByExpressions();
-
     if (orderByExpressionContexts != null) {
       OrderByExpressionContext orderByExpressionContext = orderByExpressionContexts.get(0);
-
       _isAscending = orderByExpressionContext.isAsc();
       _hasOrderBy = true;
     }
   }
 
   @Override
-  protected IntermediateResultsBlock getNextBlock() {
-    DistinctTable distinctTable = buildResult();
-
-    return new IntermediateResultsBlock(new AggregationFunction[]{_distinctAggregationFunction},
-        Collections.singletonList(distinctTable), false);
+  protected DistinctResultsBlock getNextBlock() {
+    return new DistinctResultsBlock(_distinctAggregationFunction, buildResult());
   }
 
   /**
@@ -120,8 +117,10 @@ public class DictionaryBasedDistinctOperator extends BaseOperator<IntermediateRe
           }
         }
       } else {
+        // DictionaryBasedDistinctOperator cannot handle nulls.
         DistinctTable distinctTable =
-            new DistinctTable(dataSchema, _distinctAggregationFunction.getOrderByExpressions(), limit);
+            new DistinctTable(dataSchema, _distinctAggregationFunction.getOrderByExpressions(), limit,
+                _nullHandlingEnabled);
 
         _numDocsScanned = dictLength;
         for (int i = 0; i < dictLength; i++) {
@@ -132,12 +131,17 @@ public class DictionaryBasedDistinctOperator extends BaseOperator<IntermediateRe
       }
     }
 
-    return new DistinctTable(dataSchema, records);
+    return new DistinctTable(dataSchema, records, _nullHandlingEnabled);
   }
 
   @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
+  public String toExplainString() {
+    return EXPLAIN_NAME;
+  }
+
+  @Override
+  public List<Operator> getChildOperators() {
+    return Collections.emptyList();
   }
 
   @Override

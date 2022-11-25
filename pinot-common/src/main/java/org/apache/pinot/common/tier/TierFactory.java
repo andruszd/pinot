@@ -18,6 +18,9 @@
  */
 package org.apache.pinot.common.tier;
 
+import com.google.common.collect.Sets;
+import java.util.Collections;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.helix.HelixManager;
 import org.apache.pinot.spi.config.table.TierConfig;
 
@@ -28,6 +31,7 @@ import org.apache.pinot.spi.config.table.TierConfig;
 public final class TierFactory {
 
   public static final String TIME_SEGMENT_SELECTOR_TYPE = "time";
+  public static final String FIXED_SEGMENT_SELECTOR_TYPE = "fixed";
   public static final String PINOT_SERVER_STORAGE_TYPE = "pinot_server";
 
   private TierFactory() {
@@ -43,13 +47,18 @@ public final class TierFactory {
     String segmentSelectorType = tierConfig.getSegmentSelectorType();
     if (segmentSelectorType.equalsIgnoreCase(TierFactory.TIME_SEGMENT_SELECTOR_TYPE)) {
       segmentSelector = new TimeBasedTierSegmentSelector(helixManager, tierConfig.getSegmentAge());
+    } else if (segmentSelectorType.equalsIgnoreCase(TierFactory.FIXED_SEGMENT_SELECTOR_TYPE)) {
+      segmentSelector = new FixedTierSegmentSelector(helixManager,
+          CollectionUtils.isEmpty(tierConfig.getSegmentList()) ? Collections.emptySet()
+              : Sets.newHashSet(tierConfig.getSegmentList()));
     } else {
       throw new IllegalStateException("Unsupported segmentSelectorType: " + segmentSelectorType);
     }
 
     String storageSelectorType = tierConfig.getStorageType();
     if (storageSelectorType.equalsIgnoreCase(TierFactory.PINOT_SERVER_STORAGE_TYPE)) {
-      storageSelector = new PinotServerTierStorage(tierConfig.getServerTag());
+      storageSelector = new PinotServerTierStorage(tierConfig.getServerTag(), tierConfig.getTierBackend(),
+          tierConfig.getTierBackendProperties());
     } else {
       throw new IllegalStateException("Unsupported storageType: " + storageSelectorType);
     }

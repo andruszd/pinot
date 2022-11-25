@@ -31,7 +31,6 @@ import java.util.Set;
 import org.apache.pinot.common.function.TransformFunctionType;
 import org.apache.pinot.core.operator.blocks.ProjectionBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
-import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.ByteArray;
@@ -58,8 +57,8 @@ public class InTransformFunction extends BaseTransformFunction {
   @Override
   public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
     int numArguments = arguments.size();
-    Preconditions.checkArgument(numArguments >= 2,
-        "At least 2 arguments are required for IN transform function: expression, values");
+    Preconditions.checkArgument(numArguments >= 2, "At least 2 arguments are required for [%s] "
+        + "transform function: (expression, values)", getName());
     _mainFunction = arguments.get(0);
 
     boolean allLiteralValues = true;
@@ -120,13 +119,13 @@ public class InTransformFunction extends BaseTransformFunction {
           throw new IllegalStateException();
       }
     } else {
-      Preconditions.checkArgument(_mainFunction.getResultMetadata().isSingleValue(),
-          "The first argument for IN transform function must be single-valued when there are non-literal values");
+      Preconditions.checkArgument(_mainFunction.getResultMetadata().isSingleValue(), "The first argument for [%s] "
+          + "transform function must be single-valued when there are non-literal values", getName());
       _valueFunctions = new TransformFunction[numArguments - 1];
       for (int i = 1; i < numArguments; i++) {
         TransformFunction valueFunction = arguments.get(i);
-        Preconditions.checkArgument(valueFunction.getResultMetadata().isSingleValue(),
-            "The values for IN transform function must be single-valued");
+        Preconditions.checkArgument(valueFunction.getResultMetadata().isSingleValue(), "The values for [%s] "
+                + "transform function must be single-valued", getName());
         _valueFunctions[i - 1] = valueFunction;
       }
     }
@@ -139,13 +138,14 @@ public class InTransformFunction extends BaseTransformFunction {
 
   @Override
   public int[] transformToIntValuesSV(ProjectionBlock projectionBlock) {
+    int length = projectionBlock.getNumDocs();
+
     if (_intValuesSV == null) {
-      _intValuesSV = new int[DocIdSetPlanNode.MAX_DOC_PER_CALL];
+      _intValuesSV = new int[length];
     } else {
       Arrays.fill(_intValuesSV, 0);
     }
 
-    int length = projectionBlock.getNumDocs();
     TransformResultMetadata mainFunctionMetadata = _mainFunction.getResultMetadata();
     DataType storedType = mainFunctionMetadata.getDataType().getStoredType();
     if (_valueSet != null) {

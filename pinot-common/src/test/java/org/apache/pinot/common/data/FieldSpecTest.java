@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.common.data;
 
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -55,6 +56,7 @@ public class FieldSpecTest {
     Assert.assertEquals(LONG.getStoredType(), LONG);
     Assert.assertEquals(FLOAT.getStoredType(), FLOAT);
     Assert.assertEquals(DOUBLE.getStoredType(), DOUBLE);
+    Assert.assertEquals(BIG_DECIMAL.getStoredType(), BIG_DECIMAL);
     Assert.assertEquals(BOOLEAN.getStoredType(), INT);
     Assert.assertEquals(TIMESTAMP.getStoredType(), LONG);
     Assert.assertEquals(STRING.getStoredType(), STRING);
@@ -164,6 +166,17 @@ public class FieldSpecTest {
     Assert.assertEquals(fieldSpec1.hashCode(), fieldSpec2.hashCode());
     Assert.assertEquals(fieldSpec1.getDefaultNullValue(), 1L);
 
+    // Single-value BigDecimal type dimension field with default null value.
+    fieldSpec1 = new MetricFieldSpec();
+    fieldSpec1.setName("svMetric");
+    fieldSpec1.setDataType(BIG_DECIMAL);
+    fieldSpec1.setDefaultNullValue(BigDecimal.ZERO);
+    fieldSpec2 = new MetricFieldSpec("svMetric", BIG_DECIMAL, BigDecimal.ZERO);
+    Assert.assertEquals(fieldSpec1, fieldSpec2);
+    Assert.assertEquals(fieldSpec1.toString(), fieldSpec2.toString());
+    Assert.assertEquals(fieldSpec1.hashCode(), fieldSpec2.hashCode());
+    Assert.assertEquals(fieldSpec1.getDefaultNullValue(), BigDecimal.ZERO);
+
     // Metric field with default null value for byte column.
     fieldSpec1 = new MetricFieldSpec();
     fieldSpec1.setName("byteMetric");
@@ -232,7 +245,7 @@ public class FieldSpecTest {
     boolean exceptionActual = false;
     try {
       dateTimeFieldActual = new DateTimeFieldSpec(name, dataType, format, granularity);
-    } catch (IllegalStateException e) {
+    } catch (IllegalArgumentException e) {
       exceptionActual = true;
     }
     Assert.assertEquals(exceptionActual, exceptionExpected);
@@ -249,7 +262,6 @@ public class FieldSpecTest {
     List<Object[]> entries = new ArrayList<>();
     entries.add(new Object[]{name, dataType, "1:hours", granularity, true, null});
     entries.add(new Object[]{name, dataType, "one_hours", granularity, true, null});
-    entries.add(new Object[]{name, dataType, "1:HOURS:SIMPLE_DATE_FORMAT", granularity, true, null});
     entries.add(new Object[]{name, dataType, "1:hour:EPOCH", granularity, true, null});
     entries.add(new Object[]{name, dataType, "1:HOUR:EPOCH:yyyyMMdd", granularity, true, null});
     entries.add(new Object[]{name, dataType, "0:HOURS:EPOCH", granularity, true, null});
@@ -259,6 +271,12 @@ public class FieldSpecTest {
         name, dataType, "1:HOURS:EPOCH", granularity, false,
         new DateTimeFieldSpec(name, dataType, "1:HOURS:EPOCH", granularity)
     });
+
+    entries.add(new Object[]{
+        name, dataType, "1:DAYS:SIMPLE_DATE_FORMAT", granularity, false,
+        new DateTimeFieldSpec(name, dataType, "1:DAYS:SIMPLE_DATE_FORMAT", granularity)
+    });
+
     entries.add(new Object[]{
         name, dataType, "1:DAYS:SIMPLE_DATE_FORMAT:yyyyMMdd", granularity, false,
         new DateTimeFieldSpec(name, dataType, "1:DAYS:SIMPLE_DATE_FORMAT:yyyyMMdd", granularity)
@@ -355,6 +373,14 @@ public class FieldSpecTest {
     };
     first = JsonUtils.stringToObject(getRandomOrderJsonString(dateTimeFields), DateTimeFieldSpec.class);
     second = JsonUtils.stringToObject(first.toJsonObject().toString(), DateTimeFieldSpec.class);
+    Assert.assertEquals(first, second, ERROR_MESSAGE);
+
+    // BigDecimal field
+    String[] metricFields = new String[]{
+        "\"name\":\"Salary\"", "\"dataType\":\"BIG_DECIMAL\""
+    };
+    first = JsonUtils.stringToObject(getRandomOrderJsonString(metricFields), MetricFieldSpec.class);
+    second = JsonUtils.stringToObject(first.toJsonObject().toString(), MetricFieldSpec.class);
     Assert.assertEquals(first, second, ERROR_MESSAGE);
   }
 

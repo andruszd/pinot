@@ -23,8 +23,6 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.annotation.Nulls;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.util.HashMap;
@@ -52,20 +50,23 @@ import org.apache.pinot.controller.recommender.rules.io.params.SegmentSizeRulePa
 import org.apache.pinot.controller.recommender.rules.utils.FixedLenBitset;
 import org.apache.pinot.core.query.optimizer.QueryOptimizer;
 import org.apache.pinot.core.query.request.context.QueryContext;
-import org.apache.pinot.core.query.request.context.utils.BrokerRequestToQueryContextConverter;
-import org.apache.pinot.core.requesthandler.PinotQueryParserFactory;
-import org.apache.pinot.parsers.QueryCompiler;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
+import org.apache.pinot.segment.local.utils.SchemaUtils;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.MetricFieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.sql.parsers.CalciteSqlCompiler;
+import org.apache.pinot.sql.parsers.CalciteSqlParser;
 import org.apache.pinot.sql.parsers.SqlCompilationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static java.lang.Math.max;
 import static org.apache.pinot.controller.recommender.rules.io.params.RecommenderConstants.*;
+import static org.apache.pinot.controller.recommender.rules.io.params.RecommenderConstants.FlagQueryRuleParams.ERROR_INVALID_COLUMN;
 import static org.apache.pinot.controller.recommender.rules.io.params.RecommenderConstants.FlagQueryRuleParams.ERROR_INVALID_QUERY;
 
 
@@ -89,7 +90,6 @@ public class InputManager {
   public RulesToExecute _rulesToExecute = new RulesToExecute(); // dictates which rules to execute
   public Schema _schema = new Schema();
   public SchemaWithMetaData _schemaWithMetaData = new SchemaWithMetaData();
-  public String _queryType = SQL; // SQL or PQL
   public Map<String, Double> _queryWeightMap = new HashMap<>(); // {"queryString":"queryWeight"}
   public String _tableType = OFFLINE; // OFFLINE REALTIME HYBRID
   public int _numKafkaPartitions = DEFAULT_NUM_KAFKA_PARTITIONS;
@@ -130,10 +130,13 @@ public class InputManager {
   Map<FieldSpec.DataType, Integer> _dataTypeSizeMap = new HashMap<FieldSpec.DataType, Integer>() {{
     put(FieldSpec.DataType.INT, Integer.BYTES);
     put(FieldSpec.DataType.LONG, Long.BYTES);
+    put(FieldSpec.DataType.TIMESTAMP, Long.BYTES);
     put(FieldSpec.DataType.FLOAT, Float.BYTES);
     put(FieldSpec.DataType.DOUBLE, Double.BYTES);
     put(FieldSpec.DataType.BYTES, Byte.BYTES);
     put(FieldSpec.DataType.STRING, Character.BYTES);
+    put(FieldSpec.DataType.JSON, Character.BYTES);
+    put(FieldSpec.DataType.BOOLEAN, Integer.BYTES); // Stored internally as an INTEGER
     put(null, DEFAULT_NULL_SIZE);
   }};
   protected final QueryOptimizer _queryOptimizer = new QueryOptimizer();
@@ -164,18 +167,30 @@ public class InputManager {
 
   private void validateQueries() {
     List<String> invalidQueries = new LinkedList<>();
-    QueryCompiler compiler = PinotQueryParserFactory.get(getQueryType());
     for (String queryString : _queryWeightMap.keySet()) {
       try {
-        BrokerRequest brokerRequest = compiler.compileToBrokerRequest(queryString);
-        PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-        if (pinotQuery != null) {
-          _queryOptimizer.optimize(pinotQuery, _schema);
-        } else {
-          _queryOptimizer.optimize(brokerRequest, _schema);
+        PinotQuery pinotQuery = CalciteSqlParser.compileToPinotQuery(queryString);
+        _queryOptimizer.optimize(pinotQuery, _schema);
+        QueryContext queryContext = QueryContextConverterUtils.getQueryContext(pinotQuery);
+
+        // Flag the queries having in filter columns not appear in schema
+        // to exclude user input like select i from tableName where a = xyz and t > 500
+        Set<String> filterColumns = new HashSet<>();
+        if (queryContext.getFilter() != null) {
+          // get in filter column names, excluding literals, etc
+          queryContext.getFilter().getColumns(filterColumns);
+          // remove those appear in schema
+          filterColumns.removeAll(_colNameToIntMap.keySet());
+          // flag if there are columns left
+          if (!filterColumns.isEmpty()) {
+            invalidQueries.add(queryString);
+            _overWrittenConfigs.getFlaggedQueries().add(queryString, ERROR_INVALID_COLUMN + filterColumns);
+          }
         }
-        QueryContext queryContext = BrokerRequestToQueryContextConverter.convert(brokerRequest);
-        _parsedQueries.put(queryString, Triple.of(_queryWeightMap.get(queryString), brokerRequest, queryContext));
+
+        _parsedQueries.put(queryString,
+            Triple.of(_queryWeightMap.get(queryString), CalciteSqlCompiler.convertToBrokerRequest(pinotQuery),
+                queryContext));
       } catch (SqlCompilationException e) {
         invalidQueries.add(queryString);
         _overWrittenConfigs.getFlaggedQueries().add(queryString, ERROR_INVALID_QUERY);
@@ -206,15 +221,16 @@ public class InputManager {
     String sortedColumn = _overWrittenConfigs.getIndexConfig().getSortedColumn();
     Set<String> invertedIndexColumns = _overWrittenConfigs.getIndexConfig().getInvertedIndexColumns();
     Set<String> rangeIndexColumns = _overWrittenConfigs.getIndexConfig().getRangeIndexColumns();
+    Set<String> jsonIndexColumns = _overWrittenConfigs.getIndexConfig().getJsonIndexColumns();
     Set<String> noDictionaryColumns = _overWrittenConfigs.getIndexConfig().getNoDictionaryColumns();
 
-    /*Validate if there's conflict between NoDictionaryColumns and dimNamesWithAnyIndex*/
-    Set<String> dimNamesWithAnyIndex = new HashSet<>();
-    dimNamesWithAnyIndex.add(sortedColumn);
-    dimNamesWithAnyIndex.addAll(invertedIndexColumns);
-    dimNamesWithAnyIndex.addAll(rangeIndexColumns);
+    /*Validate if there's conflict between NoDictionaryColumns and dimNamesWithDictionaryDependentIndex*/
+    Set<String> dimNamesWithDictionaryDependentIndex = new HashSet<>();
+    dimNamesWithDictionaryDependentIndex.add(sortedColumn);
+    dimNamesWithDictionaryDependentIndex.addAll(invertedIndexColumns);
+    dimNamesWithDictionaryDependentIndex.addAll(rangeIndexColumns);
     for (String colName : noDictionaryColumns) {
-      if (dimNamesWithAnyIndex.contains(colName)) {
+      if (dimNamesWithDictionaryDependentIndex.contains(colName)) {
         throw new InvalidInputException(
             "Column {0} presents in both overwritten indices and overwritten no dictionary columns", colName);
       }
@@ -339,10 +355,9 @@ public class InputManager {
   @JsonSetter(nulls = Nulls.SKIP)
   public void setSchema(JsonNode jsonNode)
       throws IOException {
-    ObjectReader reader = new ObjectMapper().readerFor(Schema.class);
-    _schema = reader.readValue(jsonNode);
-    reader = new ObjectMapper().readerFor(SchemaWithMetaData.class);
-    _schemaWithMetaData = reader.readValue(jsonNode);
+    _schema = JsonUtils.jsonNodeToObject(jsonNode, Schema.class);
+    SchemaUtils.validate(_schema);
+    _schemaWithMetaData = JsonUtils.jsonNodeToObject(jsonNode, SchemaWithMetaData.class);
     _schemaWithMetaData.getDimensionFieldSpecs().forEach(fieldMetadata -> {
       _metaDataMap.put(fieldMetadata.getName(), fieldMetadata);
     });
@@ -360,11 +375,6 @@ public class InputManager {
   @JsonIgnore
   public void setMetaDataMap(Map<String, FieldMetadata> metaDataMap) {
     _metaDataMap = metaDataMap;
-  }
-
-  @JsonSetter(nulls = Nulls.SKIP)
-  public void setQueryType(String queryType) {
-    _queryType = queryType;
   }
 
   @JsonSetter(nulls = Nulls.SKIP)
@@ -499,10 +509,6 @@ public class InputManager {
     return _metaDataMap;
   }
 
-  public String getQueryType() {
-    return _queryType;
-  }
-
   public InvertedSortedIndexJointRuleParams getInvertedSortedIndexJointRuleParams() {
     return _invertedSortedIndexJointRuleParams;
   }
@@ -635,8 +641,8 @@ public class InputManager {
       return 0;
     } else {
       if (dataType == FieldSpec.DataType.BYTES || dataType == FieldSpec.DataType.STRING) {
-        return (long) Math
-            .ceil(getCardinality(colName) * (_dataTypeSizeMap.get(dataType) * getAverageDataLen(colName)));
+        return (long) Math.ceil(
+            getCardinality(colName) * (_dataTypeSizeMap.get(dataType) * getAverageDataLen(colName)));
       } else {
         return (long) Math.ceil(getCardinality(colName) * (_dataTypeSizeMap.get(dataType)));
       }

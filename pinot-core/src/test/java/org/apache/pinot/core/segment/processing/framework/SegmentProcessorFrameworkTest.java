@@ -18,10 +18,10 @@
  */
 package org.apache.pinot.core.segment.processing.framework;
 
-import com.google.common.collect.Lists;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.IntStream;
 import org.apache.commons.io.FileUtils;
@@ -69,19 +69,20 @@ public class SegmentProcessorFrameworkTest {
   private TableConfig _tableConfig;
   private TableConfig _tableConfigNullValueEnabled;
   private TableConfig _tableConfigSegmentNameGeneratorEnabled;
+  private TableConfig _tableConfigWithFixedSegmentName;
 
   private Schema _schema;
   private Schema _schemaMV;
 
-  private final List<Object[]> _rawData = Lists
-      .newArrayList(new Object[]{"abc", 1000, 1597719600000L}, new Object[]{null, 2000, 1597773600000L},
+  private final List<Object[]> _rawData =
+      Arrays.asList(new Object[]{"abc", 1000, 1597719600000L}, new Object[]{null, 2000, 1597773600000L},
           new Object[]{"abc", null, 1597777200000L}, new Object[]{"abc", 4000, 1597795200000L},
           new Object[]{"abc", 3000, 1597802400000L}, new Object[]{null, null, 1597838400000L},
           new Object[]{"xyz", 4000, 1597856400000L}, new Object[]{null, 1000, 1597878000000L},
           new Object[]{"abc", 7000, 1597881600000L}, new Object[]{"xyz", 6000, 1597892400000L});
 
-  private final List<Object[]> _rawDataMultiValue = Lists
-      .newArrayList(new Object[]{new String[]{"a", "b"}, 1000, 1597795200000L},
+  private final List<Object[]> _rawDataMultiValue =
+      Arrays.asList(new Object[]{new String[]{"a", "b"}, 1000, 1597795200000L},
           new Object[]{null, null, 1597795200000L}, new Object[]{null, 1000, 1597795200000L},
           new Object[]{new String[]{"a", "b"}, null, 1597795200000L});
 
@@ -98,6 +99,9 @@ public class SegmentProcessorFrameworkTest {
     _tableConfigSegmentNameGeneratorEnabled =
         new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").setTimeColumnName("time").build();
     _tableConfigSegmentNameGeneratorEnabled.getIndexingConfig().setSegmentNameGeneratorType("normalizedDate");
+    _tableConfigWithFixedSegmentName =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").setTimeColumnName("time").build();
+    _tableConfigWithFixedSegmentName.getIndexingConfig().setSegmentNameGeneratorType("fixed");
 
     _schema =
         new Schema.SchemaBuilder().setSchemaName("mySchema").addSingleValueDimension("campaign", DataType.STRING, "")
@@ -239,17 +243,28 @@ public class SegmentProcessorFrameworkTest {
     assertNotNull(clicksNullValueVector);
     assertEquals(clicksNullValueVector.getNullBitmap().toArray(), new int[]{2, 5});
     timeDataSource = segment.getDataSource("time");
-    NullValueVectorReader timeNullValueVector = timeDataSource.getNullValueVector();
-    assertNotNull(timeNullValueVector);
-    assertTrue(timeNullValueVector.getNullBitmap().isEmpty());
+    assertNull(timeDataSource.getNullValueVector());
     assertEquals(segmentMetadata.getName(), "myTable_1597719600000_1597892400000_0");
+    segment.destroy();
+    FileUtils.cleanDirectory(workingDir);
+    rewindRecordReaders(_singleSegment);
+
+    // Fixed segment name
+    config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfigWithFixedSegmentName).setSchema(_schema)
+        .setSegmentConfig(new SegmentConfig.Builder().setFixedSegmentName("myTable_segment_0001").build()).build();
+    framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
+    outputSegments = framework.process();
+    assertEquals(outputSegments.size(), 1);
+    segment = ImmutableSegmentLoader.load(outputSegments.get(0), ReadMode.mmap);
+    segmentMetadata = segment.getSegmentMetadata();
+    assertEquals(segmentMetadata.getName(), "myTable_segment_0001");
     segment.destroy();
     FileUtils.cleanDirectory(workingDir);
     rewindRecordReaders(_singleSegment);
 
     // Time filter
     config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfig).setSchema(_schema).setTimeHandlerConfig(
-        new TimeHandlerConfig.Builder(TimeHandler.Type.EPOCH).setTimeRange(1597795200000L, 1597881600000L).build())
+            new TimeHandlerConfig.Builder(TimeHandler.Type.EPOCH).setTimeRange(1597795200000L, 1597881600000L).build())
         .build();
     framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
     outputSegments = framework.process();
@@ -264,9 +279,26 @@ public class SegmentProcessorFrameworkTest {
     FileUtils.cleanDirectory(workingDir);
     rewindRecordReaders(_singleSegment);
 
+    // Negate time filter
+    config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfig).setSchema(_schema).setTimeHandlerConfig(
+        new TimeHandlerConfig.Builder(TimeHandler.Type.EPOCH).setTimeRange(1597795200000L, 1597881600000L)
+            .setNegateWindowFilter(true).build()).build();
+    framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
+    outputSegments = framework.process();
+    assertEquals(outputSegments.size(), 1);
+    segmentMetadata = new SegmentMetadataImpl(outputSegments.get(0));
+    assertEquals(segmentMetadata.getTotalDocs(), 5);
+    timeMetadata = segmentMetadata.getColumnMetadataFor("time");
+    assertEquals(timeMetadata.getCardinality(), 5);
+    assertEquals(timeMetadata.getMinValue(), 1597719600000L);
+    assertEquals(timeMetadata.getMaxValue(), 1597892400000L);
+    assertEquals(segmentMetadata.getName(), "myTable_1597719600000_1597892400000_0");
+    FileUtils.cleanDirectory(workingDir);
+    rewindRecordReaders(_singleSegment);
+
     // Time filter - filtered everything
     config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfig).setSchema(_schema).setTimeHandlerConfig(
-        new TimeHandlerConfig.Builder(TimeHandler.Type.EPOCH).setTimeRange(1597968000000L, 1598054400000L).build())
+            new TimeHandlerConfig.Builder(TimeHandler.Type.EPOCH).setTimeRange(1597968000000L, 1598054400000L).build())
         .build();
     framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
     outputSegments = framework.process();
@@ -356,13 +388,9 @@ public class SegmentProcessorFrameworkTest {
     assertNotNull(campaignNullValueVector);
     assertEquals(campaignNullValueVector.getNullBitmap().toArray(), new int[]{0});
     clicksDataSource = segment.getDataSource("clicks");
-    clicksNullValueVector = clicksDataSource.getNullValueVector();
-    assertNotNull(clicksNullValueVector);
-    assertTrue(clicksNullValueVector.getNullBitmap().isEmpty());
+    assertNull(clicksDataSource.getNullValueVector());
     timeDataSource = segment.getDataSource("time");
-    timeNullValueVector = timeDataSource.getNullValueVector();
-    assertNotNull(timeNullValueVector);
-    assertTrue(timeNullValueVector.getNullBitmap().isEmpty());
+    assertNull(timeDataSource.getNullValueVector());
     assertEquals(segmentMetadata.getName(), "myTable_1597708800000_1597708800000_0");
     segment.destroy();
     // segment 1
@@ -386,13 +414,9 @@ public class SegmentProcessorFrameworkTest {
     assertNotNull(campaignNullValueVector);
     assertEquals(campaignNullValueVector.getNullBitmap().toArray(), new int[]{0});
     clicksDataSource = segment.getDataSource("clicks");
-    clicksNullValueVector = clicksDataSource.getNullValueVector();
-    assertNotNull(clicksNullValueVector);
-    assertTrue(clicksNullValueVector.getNullBitmap().isEmpty());
+    assertNull(clicksDataSource.getNullValueVector());
     timeDataSource = segment.getDataSource("time");
-    timeNullValueVector = timeDataSource.getNullValueVector();
-    assertNotNull(timeNullValueVector);
-    assertTrue(timeNullValueVector.getNullBitmap().isEmpty());
+    assertNull(timeDataSource.getNullValueVector());
     assertEquals(segmentMetadata.getName(), "myTable_1597795200000_1597795200000_1");
     segment.destroy();
     FileUtils.cleanDirectory(workingDir);
@@ -413,39 +437,41 @@ public class SegmentProcessorFrameworkTest {
 
     // Segment config
     config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfig).setSchema(_schema).setSegmentConfig(
-        new SegmentConfig.Builder().setMaxNumRecordsPerSegment(4).setSegmentNamePrefix("myPrefix").build()).build();
+        new SegmentConfig.Builder().setMaxNumRecordsPerSegment(4).setSegmentNamePrefix("myPrefix")
+            .setSegmentNamePostfix("myPostfix").build()).build();
     framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
     outputSegments = framework.process();
     assertEquals(outputSegments.size(), 3);
     outputSegments.sort(null);
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(0));
     assertEquals(segmentMetadata.getTotalDocs(), 4);
-    assertEquals(segmentMetadata.getName(), "myPrefix_1597719600000_1597795200000_0");
+    assertEquals(segmentMetadata.getName(), "myPrefix_1597719600000_1597795200000_myPostfix_0");
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(1));
     assertEquals(segmentMetadata.getTotalDocs(), 4);
-    assertEquals(segmentMetadata.getName(), "myPrefix_1597802400000_1597878000000_1");
+    assertEquals(segmentMetadata.getName(), "myPrefix_1597802400000_1597878000000_myPostfix_1");
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(2));
     assertEquals(segmentMetadata.getTotalDocs(), 2);
-    assertEquals(segmentMetadata.getName(), "myPrefix_1597881600000_1597892400000_2");
+    assertEquals(segmentMetadata.getName(), "myPrefix_1597881600000_1597892400000_myPostfix_2");
     FileUtils.cleanDirectory(workingDir);
     rewindRecordReaders(_singleSegment);
 
-    config = new SegmentProcessorConfig.Builder().setTableConfig(_tableConfigSegmentNameGeneratorEnabled)
-        .setSchema(_schema).setSegmentConfig(new SegmentConfig.Builder().setMaxNumRecordsPerSegment(4)
-            .setSegmentNamePrefix("myPrefix").build()).build();
+    config =
+        new SegmentProcessorConfig.Builder().setTableConfig(_tableConfigSegmentNameGeneratorEnabled).setSchema(_schema)
+            .setSegmentConfig(new SegmentConfig.Builder().setMaxNumRecordsPerSegment(4).setSegmentNamePrefix("myPrefix")
+                .setSegmentNamePostfix("myPostfix").build()).build();
     framework = new SegmentProcessorFramework(_singleSegment, config, workingDir);
     outputSegments = framework.process();
     assertEquals(outputSegments.size(), 3);
     outputSegments.sort(null);
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(0));
     assertEquals(segmentMetadata.getTotalDocs(), 4);
-    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-18_2020-08-19_0");
+    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-18_2020-08-19_myPostfix_0");
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(1));
     assertEquals(segmentMetadata.getTotalDocs(), 4);
-    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-19_2020-08-19_1");
+    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-19_2020-08-19_myPostfix_1");
     segmentMetadata = new SegmentMetadataImpl(outputSegments.get(2));
     assertEquals(segmentMetadata.getTotalDocs(), 2);
-    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-20_2020-08-20_2");
+    assertEquals(segmentMetadata.getName(), "myPrefix_2020-08-20_2020-08-20_myPostfix_2");
     FileUtils.cleanDirectory(workingDir);
     rewindRecordReaders(_singleSegment);
   }
@@ -522,13 +548,9 @@ public class SegmentProcessorFrameworkTest {
     assertNotNull(campaignNullValueVector);
     assertEquals(campaignNullValueVector.getNullBitmap().toArray(), new int[]{0});
     DataSource clicksDataSource = segment.getDataSource("clicks");
-    NullValueVectorReader clicksNullValueVector = clicksDataSource.getNullValueVector();
-    assertNotNull(clicksNullValueVector);
-    assertTrue(clicksNullValueVector.getNullBitmap().isEmpty());
+    assertNull(clicksDataSource.getNullValueVector());
     DataSource timeDataSource = segment.getDataSource("time");
-    NullValueVectorReader timeNullValueVector = timeDataSource.getNullValueVector();
-    assertNotNull(timeNullValueVector);
-    assertTrue(timeNullValueVector.getNullBitmap().isEmpty());
+    assertNull(timeDataSource.getNullValueVector());
     assertEquals(segmentMetadata.getName(), "myTable_1597795200000_1597795200000_0");
     segment.destroy();
     FileUtils.cleanDirectory(workingDir);

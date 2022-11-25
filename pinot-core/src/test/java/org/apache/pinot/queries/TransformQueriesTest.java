@@ -21,17 +21,13 @@ package org.apache.pinot.queries;
 
 import com.google.common.collect.ImmutableList;
 import java.io.File;
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.response.broker.AggregationResult;
-import org.apache.pinot.common.response.broker.BrokerResponseNative;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
-import org.apache.pinot.core.operator.query.AggregationGroupByOperator;
 import org.apache.pinot.core.operator.query.AggregationOperator;
+import org.apache.pinot.core.operator.query.GroupByOperator;
 import org.apache.pinot.core.query.aggregation.groupby.AggregationGroupByResult;
 import org.apache.pinot.core.query.aggregation.groupby.GroupKeyGenerator;
 import org.apache.pinot.segment.local.customobject.AvgPair;
@@ -43,6 +39,8 @@ import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
+import org.apache.pinot.spi.config.table.ingestion.TransformConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.TimeGranularitySpec;
@@ -68,6 +66,8 @@ public class TransformQueriesTest extends BaseQueriesTest {
 
   private static final String D1 = "STRING_COL";
   private static final String M1 = "INT_COL1";
+  private static final String M1_V2 = "INT_COL1_V2";
+  private static final String M1_V3 = "INT_COL1_V3";
   private static final String M2 = "INT_COL2";
   private static final String M3 = "LONG_COL1";
   private static final String M4 = "LONG_COL2";
@@ -115,16 +115,33 @@ public class TransformQueriesTest extends BaseQueriesTest {
     row.putValue(TIME, new DateTime(1973, 1, 8, 14, 6, 4, 3, DateTimeZone.UTC).getMillis());
 
     List<GenericRow> rows = new ArrayList<>(NUM_ROWS);
-    for (int i = 0; i < NUM_ROWS; i++) {
+    for (int i = 0; i < NUM_ROWS - 1; i++) {
       rows.add(row);
     }
+    // modifying the last row
+    row = new GenericRow();
+    row.putValue(D1, "Pinot");
+    row.putValue(M1, 1000);
+    row.putValue(M1_V2, null); // column for adding the groovy tranformed value
+    row.putValue(M1_V3, null); // M1_V3 doesn't exist in table schema
+    row.putValue(M2, 2000);
+    row.putValue(M3, 500000);
+    row.putValue(M4, 1000000);
+    row.putValue(TIME, new DateTime(1973, 1, 8, 14, 6, 4, 3, DateTimeZone.UTC).getMillis());
+    rows.add(row);
 
     TableConfig tableConfig =
-        new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).setTimeColumnName(TIME).build();
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).setTimeColumnName(TIME)
+        .setIngestionConfig(new IngestionConfig(null, null, null,
+            Arrays.asList(new TransformConfig(M1_V2, "Groovy({INT_COL1_V3  == null || "
+                + "INT_COL1_V3 == Integer.MIN_VALUE ? INT_COL1 : INT_COL1_V3 }, INT_COL1, INT_COL1_V3)")),
+            null, null))
+        .build();
     Schema schema =
         new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addSingleValueDimension(D1, FieldSpec.DataType.STRING)
             .addSingleValueDimension(M1, FieldSpec.DataType.INT).addSingleValueDimension(M2, FieldSpec.DataType.INT)
             .addSingleValueDimension(M3, FieldSpec.DataType.LONG).addSingleValueDimension(M4, FieldSpec.DataType.LONG)
+            .addSingleValueDimension(M1_V2, FieldSpec.DataType.INT)
             .addTime(new TimeGranularitySpec(FieldSpec.DataType.LONG, TimeUnit.MILLISECONDS, TIME), null).build();
     SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, schema);
     config.setOutDir(INDEX_DIR.getPath());
@@ -185,9 +202,8 @@ public class TransformQueriesTest extends BaseQueriesTest {
   }
 
   private void runAndVerifyInnerSegmentQuery(String query, double expectedSum, int expectedCount) {
-    AggregationOperator aggregationOperator = getOperatorForPqlQuery(query);
-    IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
-    List<Object> aggregationResult = resultsBlock.getAggregationResult();
+    AggregationOperator aggregationOperator = getOperator(query);
+    List<Object> aggregationResult = aggregationOperator.nextBlock().getResults();
     assertNotNull(aggregationResult);
     assertEquals(aggregationResult.size(), 1);
     AvgPair avgPair = (AvgPair) aggregationResult.get(0);
@@ -200,59 +216,66 @@ public class TransformQueriesTest extends BaseQueriesTest {
     String query =
         "SELECT COUNT(*) FROM testTable GROUP BY DATETRUNC('week', ADD(SUB(DIV(T, 1000), INT_COL2), INT_COL2), "
             + "'SECONDS', 'Europe/Berlin')";
-    verifyDateTruncationResult(query, "95295600");
+    verifyDateTruncationResult(query, new Object[]{95295600L});
 
     query =
         "SELECT COUNT(*) FROM testTable GROUP BY DATETRUNC('week', DIV(MULT(DIV(ADD(SUB(T, 5), 5), 1000), INT_COL2), "
             + "INT_COL2), 'SECONDS', 'Europe/Berlin', 'MILLISECONDS')";
-    verifyDateTruncationResult(query, "95295600000");
+    verifyDateTruncationResult(query, new Object[]{95295600000L});
 
     query = "SELECT COUNT(*) FROM testTable GROUP BY DATETRUNC('quarter', T, 'MILLISECONDS')";
-    verifyDateTruncationResult(query, "94694400000");
+    verifyDateTruncationResult(query, new Object[]{94694400000L});
   }
 
-  private void verifyDateTruncationResult(String query, String expectedStringKey) {
-    AggregationGroupByOperator aggregationGroupByOperator = getOperatorForPqlQuery(query);
-    IntermediateResultsBlock resultsBlock = aggregationGroupByOperator.nextBlock();
-    AggregationGroupByResult aggregationGroupByResult = resultsBlock.getAggregationGroupByResult();
+  private void verifyDateTruncationResult(String query, Object[] expectedGroupKey) {
+    GroupByOperator groupByOperator = getOperator(query);
+    AggregationGroupByResult aggregationGroupByResult = groupByOperator.nextBlock().getAggregationGroupByResult();
     assertNotNull(aggregationGroupByResult);
-    List<GroupKeyGenerator.StringGroupKey> groupKeys =
-        ImmutableList.copyOf(aggregationGroupByResult.getStringGroupKeyIterator());
+    List<GroupKeyGenerator.GroupKey> groupKeys = ImmutableList.copyOf(aggregationGroupByResult.getGroupKeyIterator());
     assertEquals(groupKeys.size(), 1);
-    assertEquals(groupKeys.get(0)._stringKey, expectedStringKey);
-    Object resultForKey = aggregationGroupByResult.getResultForKey(groupKeys.get(0), 0);
+    assertEquals(groupKeys.get(0)._keys, expectedGroupKey);
+    Object resultForKey = aggregationGroupByResult.getResultForGroupId(groupKeys.get(0)._groupId, 0);
     assertEquals(resultForKey, (long) NUM_ROWS);
   }
 
   @Test
   public void testTransformWithAvgInterSegmentInterServer() {
     String query = "SELECT AVG(SUB(INT_COL1, INT_COL2)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "-1000.00000");
+    runAndVerifyInterSegmentQuery(query, -1000.0);
 
     query = "SELECT AVG(SUB(LONG_COL1, INT_COL1)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "499000.00000");
+    runAndVerifyInterSegmentQuery(query, 499000.0);
 
     query = "SELECT AVG(SUB(LONG_COL2, LONG_COL1)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "500000.00000");
+    runAndVerifyInterSegmentQuery(query, 500000.0);
 
     query = "SELECT AVG(ADD(INT_COL1, INT_COL2)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "3000.00000");
+    runAndVerifyInterSegmentQuery(query, 3000.0);
 
     query = "SELECT AVG(ADD(INT_COL1, LONG_COL1)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "501000.00000");
+    runAndVerifyInterSegmentQuery(query, 501000.0);
 
     query = "SELECT AVG(ADD(LONG_COL1, LONG_COL2)) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "1500000.00000");
+    runAndVerifyInterSegmentQuery(query, 1500000.0);
 
     query = "SELECT AVG(ADD(DIV(INT_COL1, INT_COL2), DIV(LONG_COL1, LONG_COL2))) FROM testTable";
-    runAndVerifyInterSegmentQuery(query, "1.00000");
+    runAndVerifyInterSegmentQuery(query, 1.0);
   }
 
-  private void runAndVerifyInterSegmentQuery(String query, String expectedValue) {
-    BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(query);
-    List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
-    assertEquals(aggregationResults.size(), 1);
-    Serializable value = aggregationResults.get(0).getValue();
-    assertEquals(value, expectedValue);
+  /**
+   * This test checks the groovy transform when generic raw data could have some values that can be used to
+   * ingest values into pinot column with a different name.
+   */
+  @Test
+  public void testGroovyTransformQuery() {
+    String query = "SELECT INT_COL1, INT_COL1_V2 FROM testTable";
+    List<Object[]> result = getBrokerResponse(query).getResultTable().getRows();
+    for (Object[] obj : result) {
+      assertEquals(obj[0], obj[1]);
+    }
+  }
+
+  private void runAndVerifyInterSegmentQuery(String query, double expectedResult) {
+    assertEquals(getBrokerResponse(query).getResultTable().getRows().get(0)[0], expectedResult);
   }
 }

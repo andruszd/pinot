@@ -36,6 +36,7 @@ import org.apache.http.HttpStatus;
 import org.apache.http.NameValuePair;
 import org.apache.http.message.BasicHeader;
 import org.apache.pinot.common.utils.FileUploadDownloadClient.FileUploadType;
+import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.testng.Assert;
@@ -75,7 +76,7 @@ public class FileUploadDownloadClientTest {
       if (uploadType == FileUploadType.JSON) {
         InputStream bodyStream = httpExchange.getRequestBody();
         downloadUri = JsonUtils.stringToJsonNode(IOUtils.toString(bodyStream, "UTF-8"))
-            .get(CommonConstants.Segment.Offline.DOWNLOAD_URL).asText();
+            .get(CommonConstants.Segment.DOWNLOAD_URL).asText();
       } else if (uploadType == FileUploadType.URI) {
         downloadUri = requestHeaders.getFirst(FileUploadDownloadClient.CustomHeaders.DOWNLOAD_URI);
         String crypter = requestHeaders.getFirst(FileUploadDownloadClient.CustomHeaders.CRYPTER);
@@ -107,7 +108,7 @@ public class FileUploadDownloadClientTest {
 
       SimpleHttpResponse response = fileUploadDownloadClient
           .sendSegmentUri(FileUploadDownloadClient.getUploadSegmentHttpURI(TEST_HOST, TEST_PORT), TEST_URI, headers,
-              params, FileUploadDownloadClient.DEFAULT_SOCKET_TIMEOUT_MS);
+              params, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
       Assert.assertEquals(response.getStatusCode(), HttpStatus.SC_OK);
       Assert.assertEquals(response.getResponse(), "OK");
     }
@@ -117,7 +118,7 @@ public class FileUploadDownloadClientTest {
   public void testSendFileWithJson()
       throws Exception {
     ObjectNode segmentJson = JsonUtils.newObjectNode();
-    segmentJson.put(CommonConstants.Segment.Offline.DOWNLOAD_URL, TEST_URI);
+    segmentJson.put(CommonConstants.Segment.DOWNLOAD_URL, TEST_URI);
     String jsonString = segmentJson.toString();
     try (FileUploadDownloadClient fileUploadDownloadClient = new FileUploadDownloadClient()) {
       SimpleHttpResponse response = fileUploadDownloadClient

@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.common.function.scalar;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import org.apache.pinot.spi.annotations.ScalarFunction;
 
 
@@ -28,24 +30,29 @@ public class ArithmeticFunctions {
   private ArithmeticFunctions() {
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"add", "plus"})
   public static double plus(double a, double b) {
     return a + b;
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"sub", "minus"})
   public static double minus(double a, double b) {
     return a - b;
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"mult", "times"})
   public static double times(double a, double b) {
     return a * b;
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"div", "divide"})
   public static double divide(double a, double b) {
     return a / b;
+  }
+
+  @ScalarFunction(names = {"div", "divide"})
+  public static double divide(double a, double b, double defaultValue) {
+    return (b == 0) ? defaultValue : a / b;
   }
 
   @ScalarFunction
@@ -54,13 +61,25 @@ public class ArithmeticFunctions {
   }
 
   @ScalarFunction
-  public static double min(double a, double b) {
+  public static double least(double a, double b) {
     return Double.min(a, b);
   }
 
   @ScalarFunction
-  public static double max(double a, double b) {
+  public static double greatest(double a, double b) {
     return Double.max(a, b);
+  }
+
+  @Deprecated
+  @ScalarFunction
+  public static double min(double a, double b) {
+    return least(a, b);
+  }
+
+  @Deprecated
+  @ScalarFunction
+  public static double max(double a, double b) {
+    return greatest(a, b);
   }
 
   @ScalarFunction
@@ -68,7 +87,7 @@ public class ArithmeticFunctions {
     return Math.abs(a);
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"ceil", "ceiling"})
   public static double ceil(double a) {
     return Math.ceil(a);
   }
@@ -83,13 +102,60 @@ public class ArithmeticFunctions {
     return Math.exp(a);
   }
 
-  @ScalarFunction
+  @ScalarFunction(names = {"ln", "log"})
   public static double ln(double a) {
     return Math.log(a);
   }
 
   @ScalarFunction
+  public static double log2(double a) {
+    return Math.log(a) / Math.log(2);
+  }
+
+  @ScalarFunction
+  public static double log10(double a) {
+    return Math.log10(a);
+  }
+
+  @ScalarFunction
   public static double sqrt(double a) {
     return Math.sqrt(a);
+  }
+
+  @ScalarFunction
+  public static double sign(double a) {
+    return Math.signum(a);
+  }
+
+  @ScalarFunction(names = {"pow", "power"})
+  public static double power(double a, double exponent) {
+    return Math.pow(a, exponent);
+  }
+
+
+  // Big Decimal Implementation has been used here to avoid overflows
+  // when multiplying by Math.pow(10, scale) for rounding
+  @ScalarFunction(names = {"roundDecimal", "round_decimal"})
+  public static double roundDecimal(double a, int scale) {
+    return BigDecimal.valueOf(a).setScale(scale, RoundingMode.HALF_UP).doubleValue();
+  }
+
+  // TODO: The function should ideally be named 'round'
+  // but it is not possible because of existing DateTimeFunction with same name.
+  @ScalarFunction(names = {"roundDecimal", "round_decimal"})
+  public static double roundDecimal(double a) {
+    return Math.round(a);
+  }
+
+  // Big Decimal Implementation has been used here to avoid overflows
+  // when multiplying by Math.pow(10, scale) for rounding
+  @ScalarFunction
+  public static double truncate(double a, int scale) {
+    return BigDecimal.valueOf(a).setScale(scale, RoundingMode.DOWN).doubleValue();
+  }
+
+  @ScalarFunction
+  public static double truncate(double a) {
+    return Math.signum(a) * Math.floor(Math.abs(a));
   }
 }

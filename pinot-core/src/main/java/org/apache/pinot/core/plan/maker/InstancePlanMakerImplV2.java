@@ -25,24 +25,30 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections.MapUtils;
+import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.common.proto.Server;
 import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.request.context.FilterContext;
+import org.apache.pinot.common.request.context.OrderByExpressionContext;
+import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.core.plan.AcquireReleaseColumnsSegmentPlanNode;
-import org.apache.pinot.core.plan.AggregationGroupByOrderByPlanNode;
-import org.apache.pinot.core.plan.AggregationGroupByPlanNode;
 import org.apache.pinot.core.plan.AggregationPlanNode;
 import org.apache.pinot.core.plan.CombinePlanNode;
 import org.apache.pinot.core.plan.DistinctPlanNode;
 import org.apache.pinot.core.plan.GlobalPlanImplV0;
+import org.apache.pinot.core.plan.GroupByPlanNode;
 import org.apache.pinot.core.plan.InstanceResponsePlanNode;
 import org.apache.pinot.core.plan.Plan;
 import org.apache.pinot.core.plan.PlanNode;
 import org.apache.pinot.core.plan.SelectionPlanNode;
+import org.apache.pinot.core.plan.StreamingInstanceResponsePlanNode;
 import org.apache.pinot.core.plan.StreamingSelectionPlanNode;
 import org.apache.pinot.core.query.config.QueryExecutorConfig;
+import org.apache.pinot.core.query.prefetch.FetchPlanner;
+import org.apache.pinot.core.query.prefetch.FetchPlannerRegistry;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextUtils;
 import org.apache.pinot.core.util.GroupByUtils;
@@ -92,6 +98,7 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
   private final int _minSegmentGroupTrimSize;
   private final int _minServerGroupTrimSize;
   private final int _groupByTrimThreshold;
+  private final FetchPlanner _fetchPlanner = FetchPlannerRegistry.getPlanner();
 
   @VisibleForTesting
   public InstancePlanMakerImplV2() {
@@ -139,12 +146,13 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
         "Invalid configurable: groupByTrimThreshold: %d must be positive", _groupByTrimThreshold);
     LOGGER.info("Initializing plan maker with maxInitialResultHolderCapacity: {}, numGroupsLimit: {}, "
             + "minSegmentGroupTrimSize: {}, minServerGroupTrimSize: {}", _maxInitialResultHolderCapacity,
-        _numGroupsLimit, _minSegmentGroupTrimSize, _minServerGroupTrimSize);
+        _numGroupsLimit,
+        _minSegmentGroupTrimSize, _minServerGroupTrimSize);
   }
 
   @Override
   public Plan makeInstancePlan(List<IndexSegment> indexSegments, QueryContext queryContext,
-      ExecutorService executorService) {
+      ExecutorService executorService, ServerMetrics serverMetrics) {
     applyQueryOptions(queryContext);
 
     int numSegments = indexSegments.size();
@@ -153,15 +161,8 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
 
     if (queryContext.isEnablePrefetch()) {
       fetchContexts = new ArrayList<>(numSegments);
-      List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
       for (IndexSegment indexSegment : indexSegments) {
-        Set<String> columns;
-        if (selectExpressions.size() == 1 && "*".equals(selectExpressions.get(0).getIdentifier())) {
-          columns = indexSegment.getPhysicalColumnNames();
-        } else {
-          columns = queryContext.getColumns();
-        }
-        FetchContext fetchContext = new FetchContext(UUID.randomUUID(), indexSegment.getSegmentName(), columns);
+        FetchContext fetchContext = _fetchPlanner.planFetchForProcessing(indexSegment, queryContext);
         fetchContexts.add(fetchContext);
         planNodes.add(
             new AcquireReleaseColumnsSegmentPlanNode(makeSegmentPlanNode(indexSegment, queryContext), indexSegment,
@@ -175,11 +176,21 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
     }
 
     CombinePlanNode combinePlanNode = new CombinePlanNode(planNodes, queryContext, executorService, null);
-    return new GlobalPlanImplV0(new InstanceResponsePlanNode(combinePlanNode, indexSegments, fetchContexts));
+    return new GlobalPlanImplV0(
+        new InstanceResponsePlanNode(combinePlanNode, indexSegments, fetchContexts, queryContext));
   }
 
   private void applyQueryOptions(QueryContext queryContext) {
     Map<String, String> queryOptions = queryContext.getQueryOptions();
+
+    // Set skipUpsert
+    queryContext.setSkipUpsert(QueryOptionsUtils.isSkipUpsert(queryOptions));
+
+    // Set skipStarTree
+    queryContext.setSkipStarTree(QueryOptionsUtils.isSkipStarTree(queryOptions));
+
+    // Set skipScanFilterReorder
+    queryContext.setSkipScanFilterReorder(QueryOptionsUtils.isSkipScanFilterReorder(queryOptions));
 
     // Set maxExecutionThreads
     int maxExecutionThreads;
@@ -224,16 +235,14 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
 
   @Override
   public PlanNode makeSegmentPlanNode(IndexSegment indexSegment, QueryContext queryContext) {
+    rewriteQueryContextWithHints(queryContext, indexSegment);
     if (QueryContextUtils.isAggregationQuery(queryContext)) {
       List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
       if (groupByExpressions != null) {
-        // Aggregation group-by query
-        if (QueryOptionsUtils.isGroupByModeSQL(queryContext.getQueryOptions())) {
-          return new AggregationGroupByOrderByPlanNode(indexSegment, queryContext);
-        }
-        return new AggregationGroupByPlanNode(indexSegment, queryContext);
+        // Group-by query
+        return new GroupByPlanNode(indexSegment, queryContext);
       } else {
-        // Aggregation only query
+        // Aggregation query
         return new AggregationPlanNode(indexSegment, queryContext);
       }
     } else if (QueryContextUtils.isSelectionQuery(queryContext)) {
@@ -246,7 +255,8 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
 
   @Override
   public Plan makeStreamingInstancePlan(List<IndexSegment> indexSegments, QueryContext queryContext,
-      ExecutorService executorService, StreamObserver<Server.ServerResponse> streamObserver) {
+      ExecutorService executorService, StreamObserver<Server.ServerResponse> streamObserver,
+      ServerMetrics serverMetrics) {
     applyQueryOptions(queryContext);
 
     List<PlanNode> planNodes = new ArrayList<>(indexSegments.size());
@@ -254,16 +264,102 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
       planNodes.add(makeStreamingSegmentPlanNode(indexSegment, queryContext));
     }
     CombinePlanNode combinePlanNode = new CombinePlanNode(planNodes, queryContext, executorService, streamObserver);
-    return new GlobalPlanImplV0(new InstanceResponsePlanNode(combinePlanNode, indexSegments, Collections.emptyList()));
+    if (QueryContextUtils.isSelectionOnlyQuery(queryContext)) {
+      // selection-only is streamed in StreamingSelectionPlanNode --> here only metadata block is returned.
+      return new GlobalPlanImplV0(
+          new InstanceResponsePlanNode(combinePlanNode, indexSegments, Collections.emptyList(), queryContext));
+    } else {
+      // non-selection-only requires a StreamingInstanceResponsePlanNode to stream data block back and metadata block
+      // as final return.
+      return new GlobalPlanImplV0(
+          new StreamingInstanceResponsePlanNode(combinePlanNode, indexSegments, Collections.emptyList(), queryContext,
+              streamObserver));
+    }
   }
 
   @Override
   public PlanNode makeStreamingSegmentPlanNode(IndexSegment indexSegment, QueryContext queryContext) {
-    if (!QueryContextUtils.isSelectionQuery(queryContext)) {
-      throw new UnsupportedOperationException("Only selection queries are supported");
+    if (!QueryContextUtils.isSelectionOnlyQuery(queryContext)) {
+      // non-selection-only query goes through normal SegmentPlan.
+      // it will be stream back via StreamingInstanceResponsePlanNode
+      return makeSegmentPlanNode(indexSegment, queryContext);
     } else {
-      // Selection query
+      // Selection-only query can be directly stream back
       return new StreamingSelectionPlanNode(indexSegment, queryContext);
     }
+  }
+
+  /**
+   * In-place rewrite QueryContext based on the information from local IndexSegment.
+   *
+   * @param queryContext
+   * @param indexSegment
+   */
+  @VisibleForTesting
+  public static void rewriteQueryContextWithHints(QueryContext queryContext, IndexSegment indexSegment) {
+    Map<ExpressionContext, ExpressionContext> expressionOverrideHints = queryContext.getExpressionOverrideHints();
+    if (MapUtils.isEmpty(expressionOverrideHints)) {
+      return;
+    }
+
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    selectExpressions.replaceAll(
+        expression -> overrideWithExpressionHints(expression, indexSegment, expressionOverrideHints));
+
+    List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
+    if (CollectionUtils.isNotEmpty(groupByExpressions)) {
+      groupByExpressions.replaceAll(
+          expression -> overrideWithExpressionHints(expression, indexSegment, expressionOverrideHints));
+    }
+
+    List<OrderByExpressionContext> orderByExpressions = queryContext.getOrderByExpressions();
+    if (CollectionUtils.isNotEmpty(orderByExpressions)) {
+      orderByExpressions.replaceAll(expression -> new OrderByExpressionContext(
+          overrideWithExpressionHints(expression.getExpression(), indexSegment, expressionOverrideHints),
+          expression.isAsc()));
+    }
+
+    // In-place override
+    FilterContext filter = queryContext.getFilter();
+    if (filter != null) {
+      overrideWithExpressionHints(filter, indexSegment, expressionOverrideHints);
+    }
+
+    // In-place override
+    FilterContext havingFilter = queryContext.getHavingFilter();
+    if (havingFilter != null) {
+      overrideWithExpressionHints(havingFilter, indexSegment, expressionOverrideHints);
+    }
+  }
+
+  @VisibleForTesting
+  public static void overrideWithExpressionHints(FilterContext filter, IndexSegment indexSegment,
+      Map<ExpressionContext, ExpressionContext> expressionOverrideHints) {
+    if (filter.getChildren() != null) {
+      // AND, OR, NOT
+      for (FilterContext child : filter.getChildren()) {
+        overrideWithExpressionHints(child, indexSegment, expressionOverrideHints);
+      }
+    } else {
+      // PREDICATE
+      Predicate predicate = filter.getPredicate();
+      predicate.setLhs(overrideWithExpressionHints(predicate.getLhs(), indexSegment, expressionOverrideHints));
+    }
+  }
+
+  @VisibleForTesting
+  public static ExpressionContext overrideWithExpressionHints(ExpressionContext expression, IndexSegment indexSegment,
+      Map<ExpressionContext, ExpressionContext> expressionOverrideHints) {
+    if (expression.getType() != ExpressionContext.Type.FUNCTION) {
+      return expression;
+    }
+    ExpressionContext overrideExpression = expressionOverrideHints.get(expression);
+    if (overrideExpression != null && overrideExpression.getIdentifier() != null && indexSegment.getColumnNames()
+        .contains(overrideExpression.getIdentifier())) {
+      return overrideExpression;
+    }
+    expression.getFunction().getArguments()
+        .replaceAll(argument -> overrideWithExpressionHints(argument, indexSegment, expressionOverrideHints));
+    return expression;
   }
 }

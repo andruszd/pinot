@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.apache.pinot.spi.utils.DataSizeUtils;
 import org.apache.pinot.spi.utils.EqualityUtils;
@@ -55,20 +56,24 @@ public class StreamConfig {
 
   public static final long DEFAULT_STREAM_CONNECTION_TIMEOUT_MILLIS = 30_000;
   public static final int DEFAULT_STREAM_FETCH_TIMEOUT_MILLIS = 5_000;
+  public static final int DEFAULT_IDLE_TIMEOUT_MILLIS = 3 * 60 * 1000;
 
   private static final String SIMPLE_CONSUMER_TYPE_STRING = "simple";
+
+  private static final double CONSUMPTION_RATE_LIMIT_NOT_SPECIFIED = -1;
 
   private final String _type;
   private final String _topicName;
   private final String _tableNameWithType;
   private final List<ConsumerType> _consumerTypes = new ArrayList<>();
   private final String _consumerFactoryClassName;
-  private final OffsetCriteria _offsetCriteria;
   private final String _decoderClass;
   private final Map<String, String> _decoderProperties = new HashMap<>();
 
   private final long _connectionTimeoutMillis;
   private final int _fetchTimeoutMillis;
+
+  private final long _idleTimeoutMillis;
 
   private final int _flushThresholdRows;
   private final long _flushThresholdTimeMillis;
@@ -77,7 +82,12 @@ public class StreamConfig {
 
   private final String _groupId;
 
+  private final double _topicConsumptionRateLimit;
+
   private final Map<String, String> _streamConfigMap = new HashMap<>();
+
+  // Allow overriding it to use different offset criteria
+  private OffsetCriteria _offsetCriteria;
 
   /**
    * Initializes a StreamConfig using the map of stream configs from the table config
@@ -164,6 +174,20 @@ public class StreamConfig {
     }
     _fetchTimeoutMillis = fetchTimeoutMillis;
 
+    int idleTimeoutMillis = DEFAULT_IDLE_TIMEOUT_MILLIS;
+    String idleTimeoutMillisKey =
+        StreamConfigProperties.constructStreamProperty(_type, StreamConfigProperties.STREAM_IDLE_TIMEOUT_MILLIS);
+    String idleTimeoutMillisValue = streamConfigMap.get(idleTimeoutMillisKey);
+    if (idleTimeoutMillisValue != null) {
+      try {
+        idleTimeoutMillis = Integer.parseInt(idleTimeoutMillisValue);
+      } catch (Exception e) {
+        LOGGER.warn("Invalid config {}: {}, defaulting to: {}", idleTimeoutMillisKey, idleTimeoutMillisValue,
+            DEFAULT_IDLE_TIMEOUT_MILLIS);
+      }
+    }
+    _idleTimeoutMillis = idleTimeoutMillis;
+
     _flushThresholdRows = extractFlushThresholdRows(streamConfigMap);
     _flushThresholdTimeMillis = extractFlushThresholdTimeMillis(streamConfigMap);
     _flushThresholdSegmentSizeBytes = extractFlushThresholdSegmentSize(streamConfigMap);
@@ -183,6 +207,9 @@ public class StreamConfig {
 
     String groupIdKey = StreamConfigProperties.constructStreamProperty(_type, StreamConfigProperties.GROUP_ID);
     _groupId = streamConfigMap.get(groupIdKey);
+
+    String rate = streamConfigMap.get(StreamConfigProperties.TOPIC_CONSUMPTION_RATE_LIMIT);
+    _topicConsumptionRateLimit = rate != null ? Double.parseDouble(rate) : CONSUMPTION_RATE_LIMIT_NOT_SPECIFIED;
 
     _streamConfigMap.putAll(streamConfigMap);
   }
@@ -284,6 +311,10 @@ public class StreamConfig {
     return _offsetCriteria;
   }
 
+  public void setOffsetCriteria(OffsetCriteria offsetCriteria) {
+    _offsetCriteria = offsetCriteria;
+  }
+
   public String getDecoderClass() {
     return _decoderClass;
   }
@@ -298,6 +329,10 @@ public class StreamConfig {
 
   public int getFetchTimeoutMillis() {
     return _fetchTimeoutMillis;
+  }
+
+  public long getIdleTimeoutMillis() {
+    return _idleTimeoutMillis;
   }
 
   public int getFlushThresholdRows() {
@@ -320,6 +355,11 @@ public class StreamConfig {
     return _groupId;
   }
 
+  public Optional<Double> getTopicConsumptionRateLimit() {
+    return _topicConsumptionRateLimit == CONSUMPTION_RATE_LIMIT_NOT_SPECIFIED ? Optional.empty()
+        : Optional.of(_topicConsumptionRateLimit);
+  }
+
   public String getTableNameWithType() {
     return _tableNameWithType;
   }
@@ -333,11 +373,12 @@ public class StreamConfig {
     return "StreamConfig{" + "_type='" + _type + '\'' + ", _topicName='" + _topicName + '\'' + ", _consumerTypes="
         + _consumerTypes + ", _consumerFactoryClassName='" + _consumerFactoryClassName + '\'' + ", _offsetCriteria='"
         + _offsetCriteria + '\'' + ", _connectionTimeoutMillis=" + _connectionTimeoutMillis + ", _fetchTimeoutMillis="
-        + _fetchTimeoutMillis + ", _flushThresholdRows=" + _flushThresholdRows + ", _flushThresholdTimeMillis="
-        + _flushThresholdTimeMillis + ", _flushSegmentDesiredSizeBytes=" + _flushThresholdSegmentSizeBytes
-        + ", _flushAutotuneInitialRows=" + _flushAutotuneInitialRows + ", _decoderClass='" + _decoderClass + '\''
-        + ", _decoderProperties=" + _decoderProperties + ", _groupId='" + _groupId + ", _tableNameWithType='"
-        + _tableNameWithType + '}';
+        + _fetchTimeoutMillis + ", _idleTimeoutMillis=" + _idleTimeoutMillis + ", _flushThresholdRows="
+        + _flushThresholdRows + ", _flushThresholdTimeMillis=" + _flushThresholdTimeMillis
+        + ", _flushSegmentDesiredSizeBytes=" + _flushThresholdSegmentSizeBytes + ", _flushAutotuneInitialRows="
+        + _flushAutotuneInitialRows + ", _decoderClass='" + _decoderClass + '\'' + ", _decoderProperties="
+        + _decoderProperties + ", _groupId='" + _groupId + "', _topicConsumptionRateLimit=" + _topicConsumptionRateLimit
+        + ", _tableNameWithType='" + _tableNameWithType + '}';
   }
 
   @Override
@@ -352,18 +393,18 @@ public class StreamConfig {
 
     StreamConfig that = (StreamConfig) o;
 
-    return EqualityUtils.isEqual(_connectionTimeoutMillis, that._connectionTimeoutMillis) && EqualityUtils
-        .isEqual(_fetchTimeoutMillis, that._fetchTimeoutMillis) && EqualityUtils
-        .isEqual(_flushThresholdRows, that._flushThresholdRows) && EqualityUtils
-        .isEqual(_flushThresholdTimeMillis, that._flushThresholdTimeMillis) && EqualityUtils
-        .isEqual(_flushThresholdSegmentSizeBytes, that._flushThresholdSegmentSizeBytes) && EqualityUtils
-        .isEqual(_flushAutotuneInitialRows, that._flushAutotuneInitialRows) && EqualityUtils.isEqual(_type, that._type)
-        && EqualityUtils.isEqual(_topicName, that._topicName) && EqualityUtils
-        .isEqual(_consumerTypes, that._consumerTypes) && EqualityUtils
-        .isEqual(_consumerFactoryClassName, that._consumerFactoryClassName) && EqualityUtils
-        .isEqual(_offsetCriteria, that._offsetCriteria) && EqualityUtils.isEqual(_decoderClass, that._decoderClass)
-        && EqualityUtils.isEqual(_decoderProperties, that._decoderProperties) && EqualityUtils
-        .isEqual(_groupId, that._groupId) && EqualityUtils.isEqual(_tableNameWithType, that._tableNameWithType)
+    return EqualityUtils.isEqual(_connectionTimeoutMillis, that._connectionTimeoutMillis) && EqualityUtils.isEqual(
+        _fetchTimeoutMillis, that._fetchTimeoutMillis) && EqualityUtils.isEqual(_idleTimeoutMillis,
+        that._idleTimeoutMillis) && EqualityUtils.isEqual(_flushThresholdRows, that._flushThresholdRows)
+        && EqualityUtils.isEqual(_flushThresholdTimeMillis, that._flushThresholdTimeMillis) && EqualityUtils.isEqual(
+        _flushThresholdSegmentSizeBytes, that._flushThresholdSegmentSizeBytes) && EqualityUtils.isEqual(
+        _flushAutotuneInitialRows, that._flushAutotuneInitialRows) && EqualityUtils.isEqual(_type, that._type)
+        && EqualityUtils.isEqual(_topicName, that._topicName) && EqualityUtils.isEqual(_consumerTypes,
+        that._consumerTypes) && EqualityUtils.isEqual(_consumerFactoryClassName, that._consumerFactoryClassName)
+        && EqualityUtils.isEqual(_offsetCriteria, that._offsetCriteria) && EqualityUtils.isEqual(_decoderClass,
+        that._decoderClass) && EqualityUtils.isEqual(_decoderProperties, that._decoderProperties)
+        && EqualityUtils.isEqual(_groupId, that._groupId) && EqualityUtils.isEqual(_tableNameWithType,
+        that._tableNameWithType) && EqualityUtils.isEqual(_topicConsumptionRateLimit, that._topicConsumptionRateLimit)
         && EqualityUtils.isEqual(_streamConfigMap, that._streamConfigMap);
   }
 
@@ -376,6 +417,7 @@ public class StreamConfig {
     result = EqualityUtils.hashCodeOf(result, _offsetCriteria);
     result = EqualityUtils.hashCodeOf(result, _connectionTimeoutMillis);
     result = EqualityUtils.hashCodeOf(result, _fetchTimeoutMillis);
+    result = EqualityUtils.hashCodeOf(result, _idleTimeoutMillis);
     result = EqualityUtils.hashCodeOf(result, _flushThresholdRows);
     result = EqualityUtils.hashCodeOf(result, _flushThresholdTimeMillis);
     result = EqualityUtils.hashCodeOf(result, _flushThresholdSegmentSizeBytes);
@@ -383,6 +425,7 @@ public class StreamConfig {
     result = EqualityUtils.hashCodeOf(result, _decoderClass);
     result = EqualityUtils.hashCodeOf(result, _decoderProperties);
     result = EqualityUtils.hashCodeOf(result, _groupId);
+    result = EqualityUtils.hashCodeOf(result, _topicConsumptionRateLimit);
     result = EqualityUtils.hashCodeOf(result, _streamConfigMap);
     result = EqualityUtils.hashCodeOf(result, _tableNameWithType);
     return result;

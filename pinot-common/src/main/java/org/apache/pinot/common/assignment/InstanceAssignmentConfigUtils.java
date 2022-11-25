@@ -20,6 +20,7 @@ package org.apache.pinot.common.assignment;
 
 import com.google.common.base.Preconditions;
 import java.util.Map;
+import org.apache.pinot.common.utils.config.TableConfigUtils;
 import org.apache.pinot.common.utils.config.TagNameUtils;
 import org.apache.pinot.spi.config.table.ReplicaGroupStrategyConfig;
 import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
@@ -55,6 +56,9 @@ public class InstanceAssignmentConfigUtils {
    */
   public static boolean allowInstanceAssignment(TableConfig tableConfig,
       InstancePartitionsType instancePartitionsType) {
+    if (TableConfigUtils.hasPreConfiguredInstancePartitions(tableConfig, instancePartitionsType)) {
+      return true;
+    }
     TableType tableType = tableConfig.getTableType();
     Map<InstancePartitionsType, InstanceAssignmentConfig> instanceAssignmentConfigMap =
         tableConfig.getInstanceAssignmentConfigMap();
@@ -102,21 +106,22 @@ public class InstanceAssignmentConfigUtils {
 
     InstanceReplicaGroupPartitionConfig replicaGroupPartitionConfig;
     SegmentsValidationAndRetentionConfig segmentConfig = tableConfig.getValidationConfig();
-    int numReplicaGroups = segmentConfig.getReplicationNumber();
+    int numReplicaGroups = tableConfig.getReplication();
     ReplicaGroupStrategyConfig replicaGroupStrategyConfig = segmentConfig.getReplicaGroupStrategyConfig();
     Preconditions.checkState(replicaGroupStrategyConfig != null, "Failed to find the replica-group strategy config");
     String partitionColumn = replicaGroupStrategyConfig.getPartitionColumn();
+    boolean minimizeDataMovement = segmentConfig.isMinimizeDataMovement();
     if (partitionColumn != null) {
       int numPartitions = tableConfig.getIndexingConfig().getSegmentPartitionConfig().getNumPartitions(partitionColumn);
       Preconditions.checkState(numPartitions > 0, "Number of partitions for column: %s is not properly configured",
           partitionColumn);
       replicaGroupPartitionConfig = new InstanceReplicaGroupPartitionConfig(true, 0, numReplicaGroups, 0, numPartitions,
-          replicaGroupStrategyConfig.getNumInstancesPerPartition());
+          replicaGroupStrategyConfig.getNumInstancesPerPartition(), minimizeDataMovement);
     } else {
       // If partition column is not configured, use replicaGroupStrategyConfig.getNumInstancesPerPartition() as
       // number of instances per replica-group for backward-compatibility
       replicaGroupPartitionConfig = new InstanceReplicaGroupPartitionConfig(true, 0, numReplicaGroups,
-          replicaGroupStrategyConfig.getNumInstancesPerPartition(), 0, 0);
+          replicaGroupStrategyConfig.getNumInstancesPerPartition(), 0, 0, minimizeDataMovement);
     }
 
     return new InstanceAssignmentConfig(tagPoolConfig, null, replicaGroupPartitionConfig);

@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.configuration.ConfigurationException;
+import org.apache.pinot.query.service.QueryConfig;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.tools.Command;
@@ -51,6 +52,10 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
   @CommandLine.Option(names = {"-brokerPort"}, required = false, description = "Broker port number to use for query.")
   private int _brokerPort = CommonConstants.Helix.DEFAULT_BROKER_QUERY_PORT;
 
+  @CommandLine.Option(names = {"-brokerMultiStageRunnerPort"}, required = false,
+      description = "Broker port number to use for query.")
+  private int _brokerMultiStageRunnerPort = QueryConfig.DEFAULT_QUERY_RUNNER_PORT;
+
   @CommandLine.Option(names = {"-zkAddress"}, required = false, description = "HTTP address of Zookeeper.")
   private String _zkAddress = DEFAULT_ZK_ADDRESS;
 
@@ -66,6 +71,34 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
 
   public boolean getHelp() {
     return _help;
+  }
+
+  public String getBrokerHost() {
+    return _brokerHost;
+  }
+
+  public int getBrokerPort() {
+    return _brokerPort;
+  }
+
+  public int getBrokerMultiStageRunnerPort() {
+    return _brokerMultiStageRunnerPort;
+  }
+
+  public String getZkAddress() {
+    return _zkAddress;
+  }
+
+  public String getClusterName() {
+    return _clusterName;
+  }
+
+  public String getConfigFileName() {
+    return _configFileName;
+  }
+
+  public Map<String, Object> getConfigOverrides() {
+    return _configOverrides;
   }
 
   @Override
@@ -84,7 +117,6 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -99,6 +131,11 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
 
   public StartBrokerCommand setPort(int port) {
     _brokerPort = port;
+    return this;
+  }
+
+  public StartBrokerCommand setBrokerMultiStageRunnerPort(int brokerMultiStageRunnerPort) {
+    _brokerMultiStageRunnerPort = brokerMultiStageRunnerPort;
     return this;
   }
 
@@ -126,18 +163,19 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
       StartServiceManagerCommand startServiceManagerCommand =
           new StartServiceManagerCommand().setZkAddress(_zkAddress).setClusterName(_clusterName).setPort(-1)
               .setBootstrapServices(new String[0]).addBootstrapService(ServiceRole.BROKER, brokerConf);
-      startServiceManagerCommand.execute();
-      String pidFile = ".pinotAdminBroker-" + System.currentTimeMillis() + ".pid";
-      savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
-      return true;
+      if (startServiceManagerCommand.execute()) {
+        String pidFile = ".pinotAdminBroker-" + System.currentTimeMillis() + ".pid";
+        savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
+        return true;
+      }
     } catch (Exception e) {
       LOGGER.error("Caught exception while starting broker, exiting", e);
-      System.exit(-1);
-      return false;
     }
+    System.exit(-1);
+    return false;
   }
 
-  private Map<String, Object> getBrokerConf()
+  protected Map<String, Object> getBrokerConf()
       throws ConfigurationException, SocketException, UnknownHostException {
     Map<String, Object> properties = new HashMap<>();
     if (_configFileName != null) {
@@ -147,7 +185,8 @@ public class StartBrokerCommand extends AbstractBaseAdminCommand implements Comm
       _zkAddress = MapUtils.getString(properties, CommonConstants.Helix.CONFIG_OF_ZOOKEEPR_SERVER, _zkAddress);
       _clusterName = MapUtils.getString(properties, CommonConstants.Helix.CONFIG_OF_CLUSTER_NAME, _clusterName);
     } else {
-      properties.putAll(PinotConfigUtils.generateBrokerConf(_clusterName, _zkAddress, _brokerHost, _brokerPort));
+      properties.putAll(PinotConfigUtils.generateBrokerConf(_clusterName, _zkAddress, _brokerHost, _brokerPort,
+          _brokerMultiStageRunnerPort));
     }
     if (_configOverrides != null) {
       properties.putAll(_configOverrides);

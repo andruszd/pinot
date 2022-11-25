@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.tools.admin.command;
 
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.plugin.PluginManager;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -87,9 +88,14 @@ public class BootstrapTableCommand extends AbstractBaseAdminCommand implements C
   @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
   private String _authToken;
 
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
+
   @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
       description = "Print this message.")
   private boolean _help = false;
+
+  private AuthProvider _authProvider;
 
   @Override
   public boolean getHelp() {
@@ -106,6 +112,11 @@ public class BootstrapTableCommand extends AbstractBaseAdminCommand implements C
     return this;
   }
 
+  public BootstrapTableCommand setAuthProvider(AuthProvider authProvider) {
+    _authProvider = authProvider;
+    return this;
+  }
+
   @Override
   public String toString() {
     return ("BootstrapTable -dir " + _dir);
@@ -113,7 +124,6 @@ public class BootstrapTableCommand extends AbstractBaseAdminCommand implements C
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -128,8 +138,7 @@ public class BootstrapTableCommand extends AbstractBaseAdminCommand implements C
     if (_controllerHost == null) {
       _controllerHost = NetUtils.getHostAddress();
     }
-    String token = makeAuthToken(_authToken, _user, _password);
-    return new BootstrapTableTool(_controllerProtocol, _controllerHost, Integer.parseInt(_controllerPort), _dir, token)
-        .execute();
+    return new BootstrapTableTool(_controllerProtocol, _controllerHost, Integer.parseInt(_controllerPort), _dir,
+        makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password)).execute();
   }
 }

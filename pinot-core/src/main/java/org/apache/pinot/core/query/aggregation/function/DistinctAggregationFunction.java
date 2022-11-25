@@ -21,6 +21,7 @@ package org.apache.pinot.core.query.aggregation.function;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
@@ -80,13 +81,12 @@ public class DistinctAggregationFunction implements AggregationFunction<Object, 
 
   @Override
   public String getColumnName() {
-    return AggregationFunctionType.DISTINCT.getName() + "_" + AggregationFunctionUtils.concatArgs(_columns);
+    return AggregationFunctionType.DISTINCT.getName() + "_" + StringUtils.join(_columns, ':');
   }
 
   @Override
   public String getResultColumnName() {
-    return AggregationFunctionType.DISTINCT.getName().toLowerCase() + "(" + AggregationFunctionUtils
-        .concatArgs(_columns) + ")";
+    return AggregationFunctionType.DISTINCT.getName().toLowerCase() + "(" + StringUtils.join(_columns, ':') + ")";
   }
 
   @Override
@@ -150,5 +150,18 @@ public class DistinctAggregationFunction implements AggregationFunction<Object, 
   @Override
   public Comparable extractFinalResult(Object intermediateResult) {
     throw new UnsupportedOperationException("Operation not supported for DISTINCT aggregation function");
+  }
+
+  @Override
+  public String toExplainString() {
+    StringBuilder stringBuilder = new StringBuilder(getType().getName()).append('(');
+    int numArguments = getInputExpressions().size();
+    if (numArguments > 0) {
+      stringBuilder.append(getInputExpressions().get(0).toString());
+      for (int i = 1; i < numArguments; i++) {
+        stringBuilder.append(", ").append(getInputExpressions().get(i).toString());
+      }
+    }
+    return stringBuilder.append(')').toString();
   }
 }

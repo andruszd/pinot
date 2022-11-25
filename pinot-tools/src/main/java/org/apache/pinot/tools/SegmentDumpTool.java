@@ -35,31 +35,24 @@ import org.apache.pinot.segment.spi.index.startree.StarTreeV2;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.utils.ReadMode;
-import org.kohsuke.args4j.Argument;
-import org.kohsuke.args4j.CmdLineParser;
-import org.kohsuke.args4j.Option;
-import org.kohsuke.args4j.spi.StringArrayOptionHandler;
+import picocli.CommandLine;
 
 
+@CommandLine.Command
 public class SegmentDumpTool extends AbstractBaseCommand implements Command {
-  @Argument
-  @Option(name = "-path", required = true, metaVar = "<string>",
-      usage = "Path of the folder containing the segment" + " file")
+  @CommandLine.Option(names = {"-path"}, required = true,
+      description = "Path of the folder containing the segment" + " file")
   private String _segmentDir = null;
 
-  @Argument(index = 1, multiValued = true)
-  @Option(name = "-columns", handler = StringArrayOptionHandler.class, usage = "Columns to dump")
+  @CommandLine.Option(names = {"-columns"}, arity = "1..*", description = "Columns to dump")
   private List<String> _columnNames;
 
-  @Option(name = "-dumpStarTree")
+  @CommandLine.Option(names = {"-dumpStarTree"})
   private boolean _dumpStarTree = false;
 
-  public void doMain(String[] args)
-      throws Exception {
-    CmdLineParser parser = new CmdLineParser(this);
-    parser.parseArgument(args);
-    dump();
-  }
+  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, usageHelp = true,
+      description = "Print this message.")
+  private boolean _help = false;
 
   private void dump()
       throws Exception {
@@ -153,7 +146,14 @@ public class SegmentDumpTool extends AbstractBaseCommand implements Command {
 
   public static void main(String[] args)
       throws Exception {
-    new SegmentDumpTool().doMain(args);
+    SegmentDumpTool tool = new SegmentDumpTool();
+    CommandLine commandLine = new CommandLine(tool);
+    CommandLine.ParseResult result = commandLine.parseArgs(args);
+    if (commandLine.isUsageHelpRequested() || result.matchedArgs().size() == 0) {
+      commandLine.usage(System.out);
+      return;
+    }
+    tool.execute();
   }
 
   public String getName() {
@@ -174,6 +174,6 @@ public class SegmentDumpTool extends AbstractBaseCommand implements Command {
 
   @Override
   public boolean getHelp() {
-    return false;
+    return _help;
   }
 }

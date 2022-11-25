@@ -18,83 +18,80 @@
  */
 package org.apache.pinot.common.utils.request;
 
-import java.util.ArrayList;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Splitter;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNumericLiteral;
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang.mutable.MutableInt;
-import org.apache.pinot.common.request.BrokerRequest;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.ExpressionType;
-import org.apache.pinot.common.request.FilterQuery;
-import org.apache.pinot.common.request.FilterQueryMap;
 import org.apache.pinot.common.request.Function;
 import org.apache.pinot.common.request.Identifier;
 import org.apache.pinot.common.request.Literal;
-import org.apache.pinot.pql.parsers.pql2.ast.AstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.FloatingPointLiteralAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.FunctionCallAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.IdentifierAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.IntegerLiteralAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.LiteralAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.PredicateAstNode;
-import org.apache.pinot.pql.parsers.pql2.ast.StringLiteralAstNode;
+import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.spi.utils.BytesUtils;
+import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.sql.FilterKind;
+import org.apache.pinot.sql.parsers.CalciteSqlParser;
+import org.apache.pinot.sql.parsers.SqlCompilationException;
+import org.apache.pinot.sql.parsers.SqlNodeAndOptions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 public class RequestUtils {
+  private static final Logger LOGGER = LoggerFactory.getLogger(RequestUtils.class);
+
   private RequestUtils() {
   }
 
-  /**
-   * Generates thrift compliant filterQuery and populate it in the broker request
-   * @param filterQueryTree
-   * @param request
-   */
-  public static void generateFilterFromTree(FilterQueryTree filterQueryTree, BrokerRequest request) {
-    Map<Integer, FilterQuery> filterQueryMap = new HashMap<>();
-    MutableInt currentId = new MutableInt(0);
-    FilterQuery root = traverseFilterQueryAndPopulateMap(filterQueryTree, filterQueryMap, currentId);
-    filterQueryMap.put(root.getId(), root);
-    request.setFilterQuery(root);
-    FilterQueryMap mp = new FilterQueryMap();
-    mp.setFilterQueryMap(filterQueryMap);
-    request.setFilterSubQueryMap(mp);
+  public static SqlNodeAndOptions parseQuery(String query, JsonNode request)
+      throws SqlCompilationException {
+    long parserStartTimeNs = System.nanoTime();
+    SqlNodeAndOptions sqlNodeAndOptions = CalciteSqlParser.compileToSqlNodeAndOptions(query);
+    setOptions(sqlNodeAndOptions, request);
+    sqlNodeAndOptions.setParseTimeNs(System.nanoTime() - parserStartTimeNs);
+    return sqlNodeAndOptions;
   }
 
   /**
-   * Creates Expression from identifier
-   * @param identifier
-   * @return
+   * Sets extra options for the given query.
    */
-  public static Expression createIdentifierExpression(String identifier) {
-    Expression expression = new Expression(ExpressionType.IDENTIFIER);
-    expression.setIdentifier(new Identifier(identifier));
-    return expression;
-  }
-
-  /**
-   * Creates Literal Expression from LiteralAstNode.
-   * @param value
-   * @return
-   */
-  public static Expression createLiteralExpression(LiteralAstNode value) {
-    Expression expression = new Expression(ExpressionType.LITERAL);
-    Literal literal = new Literal();
-    if (value instanceof StringLiteralAstNode) {
-      literal.setStringValue(((StringLiteralAstNode) value).getText());
+  @VisibleForTesting
+  public static void setOptions(SqlNodeAndOptions sqlNodeAndOptions, JsonNode jsonRequest) {
+    Map<String, String> queryOptions = new HashMap<>();
+    if (jsonRequest.has(CommonConstants.Broker.Request.DEBUG_OPTIONS)) {
+      Map<String, String> debugOptions = RequestUtils.getOptionsFromJson(jsonRequest,
+          CommonConstants.Broker.Request.DEBUG_OPTIONS);
+      // TODO: remove debug options after releasing 0.11.0.
+      if (!debugOptions.isEmpty()) {
+        // NOTE: Debug options are deprecated. Put all debug options into query options for backward compatibility.
+        LOGGER.debug("Debug options are set to: {}", debugOptions);
+        queryOptions.putAll(debugOptions);
+      }
     }
-    if (value instanceof IntegerLiteralAstNode) {
-      literal.setLongValue(((IntegerLiteralAstNode) value).getValue());
+    if (jsonRequest.has(CommonConstants.Broker.Request.QUERY_OPTIONS)) {
+      Map<String, String> queryOptionsFromJson = RequestUtils.getOptionsFromJson(jsonRequest,
+          CommonConstants.Broker.Request.QUERY_OPTIONS);
+      queryOptions.putAll(queryOptionsFromJson);
     }
-    if (value instanceof FloatingPointLiteralAstNode) {
-      literal.setDoubleValue(((FloatingPointLiteralAstNode) value).getValue());
+    boolean enableTrace = jsonRequest.has(CommonConstants.Broker.Request.TRACE) && jsonRequest.get(
+        CommonConstants.Broker.Request.TRACE).asBoolean();
+    if (enableTrace) {
+      queryOptions.put(CommonConstants.Broker.Request.TRACE, "true");
     }
-    expression.setLiteral(literal);
-    return expression;
+    if (!queryOptions.isEmpty()) {
+      LOGGER.debug("Query options are set to: {}", queryOptions);
+    }
+    // TODO: Remove the SQL query options after releasing 0.11.0
+    // The query engine will break if these 2 options are missing during version upgrade.
+    queryOptions.put(CommonConstants.Broker.Request.QueryOptionKey.GROUP_BY_MODE, CommonConstants.Broker.Request.SQL);
+    queryOptions.put(CommonConstants.Broker.Request.QueryOptionKey.RESPONSE_FORMAT, CommonConstants.Broker.Request.SQL);
+    // Setting all query options back into SqlNodeAndOptions. The above ordering matters due to priority overwrite rule
+    sqlNodeAndOptions.setExtraOptions(queryOptions);
   }
 
   public static Expression getIdentifierExpression(String identifier) {
@@ -107,6 +104,7 @@ public class RequestUtils {
     Expression expression = new Expression(ExpressionType.LITERAL);
     Literal literal = new Literal();
     if (node instanceof SqlNumericLiteral) {
+      // TODO: support different integer and floating point type.
       // Mitigate calcite NPE bug, we need to check if SqlNumericLiteral.getScale() is null before calling
       // SqlNumericLiteral.isInteger(). TODO: Undo this fix once a Calcite release that contains CALCITE-4199 is
       // available and Pinot has been upgraded to use such a release.
@@ -117,7 +115,15 @@ public class RequestUtils {
         literal.setDoubleValue(node.bigDecimalValue().doubleValue());
       }
     } else {
-      literal.setStringValue(StringUtils.replace(node.toValue(), "''", "'"));
+      // TODO: Support null literal and other types.
+      switch (node.getTypeName()) {
+        case BOOLEAN:
+          literal.setBoolValue(node.booleanValue());
+          break;
+        default:
+          literal.setStringValue(StringUtils.replace(node.toValue(), "''", "'"));
+          break;
+      }
     }
     expression.setLiteral(literal);
     return expression;
@@ -170,106 +176,46 @@ public class RequestUtils {
     if (object instanceof byte[]) {
       return RequestUtils.getLiteralExpression((byte[]) object);
     }
+    if (object instanceof Boolean) {
+      return RequestUtils.getLiteralExpression(((Boolean) object).booleanValue());
+    }
     return RequestUtils.getLiteralExpression(object.toString());
   }
 
-  public static Expression getFunctionExpression(String operator) {
+  public static Expression getFunctionExpression(String canonicalName) {
+    assert canonicalName.equalsIgnoreCase(canonicalizeFunctionNamePreservingSpecialKey(canonicalName));
     Expression expression = new Expression(ExpressionType.FUNCTION);
-    Function function = new Function(operator);
+    Function function = new Function(canonicalName);
     expression.setFunctionCall(function);
     return expression;
   }
 
-  private static FilterQuery traverseFilterQueryAndPopulateMap(FilterQueryTree tree,
-      Map<Integer, FilterQuery> filterQueryMap, MutableInt currentId) {
-    int currentNodeId = currentId.intValue();
-    currentId.increment();
+  /**
+   * Converts the function name into its canonical form.
+   */
+  public static String canonicalizeFunctionName(String functionName) {
+    return StringUtils.remove(functionName, '_').toLowerCase();
+  }
 
-    final List<Integer> f = new ArrayList<>();
-    if (null != tree.getChildren()) {
-      for (final FilterQueryTree c : tree.getChildren()) {
-        final FilterQuery q = traverseFilterQueryAndPopulateMap(c, filterQueryMap, currentId);
-        int childNodeId = q.getId();
-        f.add(childNodeId);
-        filterQueryMap.put(childNodeId, q);
-      }
+  private static final Map<String, String> CANONICAL_NAME_TO_SPECIAL_KEY_MAP;
+
+  static {
+    CANONICAL_NAME_TO_SPECIAL_KEY_MAP = new HashMap<>();
+    for (FilterKind filterKind : FilterKind.values()) {
+      CANONICAL_NAME_TO_SPECIAL_KEY_MAP.put(canonicalizeFunctionName(filterKind.name()), filterKind.name());
     }
-
-    FilterQuery query = new FilterQuery();
-    query.setColumn(tree.getColumn());
-    query.setId(currentNodeId);
-    query.setNestedFilterQueryIds(f);
-    query.setOperator(tree.getOperator());
-    query.setValue(tree.getValue());
-    return query;
+    CANONICAL_NAME_TO_SPECIAL_KEY_MAP.put("stdistance", "st_distance");
   }
 
   /**
-   * Generate FilterQueryTree from Broker Request
-   * @param request Broker Request
-   * @return
+   * Converts the function name into its canonical form, but preserving the special keys.
+   * - Keep FilterKind.name() as is because we need to read the FilterKind via FilterKind.valueOf().
+   * - Keep ST_Distance as is because we use exact match when applying geo-spatial index up to release 0.10.0.
+   * TODO: Remove the ST_Distance special handling after releasing 0.11.0.
    */
-  public static FilterQueryTree generateFilterQueryTree(BrokerRequest request) {
-    FilterQueryTree root = null;
-
-    FilterQuery q = request.getFilterQuery();
-
-    if (null != q && null != request.getFilterSubQueryMap()) {
-      root = buildFilterQuery(q.getId(), request.getFilterSubQueryMap().getFilterQueryMap());
-    }
-
-    return root;
-  }
-
-  public static FilterQueryTree buildFilterQuery(Integer id, Map<Integer, FilterQuery> queryMap) {
-    FilterQuery q = queryMap.get(id);
-
-    List<Integer> children = q.getNestedFilterQueryIds();
-
-    List<FilterQueryTree> c = null;
-    if (null != children && !children.isEmpty()) {
-      c = new ArrayList<>();
-      for (final Integer i : children) {
-        final FilterQueryTree t = buildFilterQuery(i, queryMap);
-        c.add(t);
-      }
-    }
-
-    return new FilterQueryTree(q.getColumn(), q.getValue(), q.getOperator(), c);
-  }
-
-  /**
-   * Returns the expression from a given {@link AstNode}, which can be one of the following:
-   * <ul>
-   *   <li> {@link FunctionCallAstNode}</li>
-   *   <li> {@link LiteralAstNode}</li>
-   *   <li> {@link PredicateAstNode}</li>
-   * </ul>
-   *
-   * @return Expression
-   */
-  public static Expression getExpression(AstNode astNode) {
-    if (astNode instanceof IdentifierAstNode) {
-      // Column name
-      return createIdentifierExpression(((IdentifierAstNode) astNode).getName());
-    } else if (astNode instanceof FunctionCallAstNode) {
-      // Function expression
-      Expression expression = getFunctionExpression(((FunctionCallAstNode) astNode).getName());
-      Function func = expression.getFunctionCall();
-      final List<? extends AstNode> operandsAstNodes = astNode.getChildren();
-      if (operandsAstNodes != null) {
-        for (AstNode child : operandsAstNodes) {
-          func.addToOperands(getExpression(child));
-        }
-      }
-      return expression;
-    } else if (astNode instanceof LiteralAstNode) {
-      return createLiteralExpression(((LiteralAstNode) astNode));
-    } else if (astNode instanceof PredicateAstNode) {
-      return ((PredicateAstNode) astNode).buildFilterExpression();
-    } else {
-      throw new IllegalStateException("Cannot get expression from " + astNode.getClass().getSimpleName());
-    }
+  public static String canonicalizeFunctionNamePreservingSpecialKey(String functionName) {
+    String canonicalName = canonicalizeFunctionName(functionName);
+    return CANONICAL_NAME_TO_SPECIAL_KEY_MAP.getOrDefault(canonicalName, canonicalName);
   }
 
   public static String prettyPrint(Expression expression) {
@@ -299,5 +245,20 @@ public class RequestUtils {
       return res;
     }
     return null;
+  }
+
+  public static String getTableName(PinotQuery pinotQuery) {
+    while (pinotQuery.getDataSource().getSubquery() != null) {
+      pinotQuery = pinotQuery.getDataSource().getSubquery();
+    }
+    return pinotQuery.getDataSource().getTableName();
+  }
+
+  public static Map<String, String> getOptionsFromJson(JsonNode request, String optionsKey) {
+    return getOptionsFromString(request.get(optionsKey).asText());
+  }
+
+  public static Map<String, String> getOptionsFromString(String optionStr) {
+    return Splitter.on(';').omitEmptyStrings().trimResults().withKeyValueSeparator('=').split(optionStr);
   }
 }

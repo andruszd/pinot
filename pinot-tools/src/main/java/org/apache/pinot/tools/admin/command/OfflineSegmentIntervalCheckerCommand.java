@@ -22,12 +22,11 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.helix.PropertyPathConfig;
-import org.apache.helix.PropertyType;
-import org.apache.helix.ZNRecord;
+import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
-import org.apache.helix.manager.zk.ZNRecordSerializer;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.controller.util.SegmentIntervalUtils;
@@ -47,7 +46,6 @@ import picocli.CommandLine;
 public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(OfflineSegmentIntervalCheckerCommand.class);
 
-  private ZKHelixAdmin _helixAdmin;
   private ZkHelixPropertyStore<ZNRecord> _propertyStore;
 
   @CommandLine.Option(names = {"-zkAddress"}, required = true, description = "Zookeeper server:port/cluster")
@@ -56,7 +54,7 @@ public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminComma
   @CommandLine.Option(names = {"-clusterName"}, required = true, description = "Helix cluster name")
   private String _clusterName;
 
-  @CommandLine.Option(names = {"-tableNames"}, 
+  @CommandLine.Option(names = {"-tableNames"},
       description = "Comma separated list of tables to check for invalid segment intervals")
   private String _tableNames;
 
@@ -80,7 +78,6 @@ public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminComma
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -93,13 +90,13 @@ public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminComma
       throws Exception {
     LOGGER.info("Executing command: " + toString());
 
-    _helixAdmin = new ZKHelixAdmin(_zkAddress);
+    ZKHelixAdmin helixAdmin = new ZKHelixAdmin.Builder().setZkAddress(_zkAddress).build();
     _propertyStore = new ZkHelixPropertyStore<>(_zkAddress, new ZNRecordSerializer(),
-        PropertyPathConfig.getPath(PropertyType.PROPERTYSTORE, _clusterName));
+        PropertyPathBuilder.propertyStore(_clusterName));
 
     List<String> offlineTables = new ArrayList<>();
     if (StringUtils.isBlank(_tableNames)) {
-      List<String> resourcesInCluster = _helixAdmin.getResourcesInCluster(_clusterName);
+      List<String> resourcesInCluster = helixAdmin.getResourcesInCluster(_clusterName);
       for (String tableName : resourcesInCluster) {
         if (TableNameBuilder.isOfflineTableResource(tableName)) {
           offlineTables.add(tableName);

@@ -42,7 +42,6 @@ import org.testng.annotations.Test;
 import static org.apache.pinot.segment.spi.V1Constants.Indexes.BITMAP_RANGE_INDEX_FILE_EXTENSION;
 import static org.apache.pinot.spi.data.FieldSpec.DataType.*;
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 
 
 public class BitSlicedIndexCreatorTest {
@@ -65,14 +64,12 @@ public class BitSlicedIndexCreatorTest {
 
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testFailToCreateRawString() {
-    new BitSlicedRangeIndexCreator(INDEX_DIR, new ColumnMetadataImpl.Builder()
-        .setFieldSpec(new DimensionFieldSpec("foo", STRING, true)).build());
+    new BitSlicedRangeIndexCreator(INDEX_DIR, new DimensionFieldSpec("foo", STRING, true), null, null);
   }
 
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testFailToCreateMV() {
-    new BitSlicedRangeIndexCreator(INDEX_DIR, new ColumnMetadataImpl.Builder()
-        .setFieldSpec(new DimensionFieldSpec("foo", INT, false)).build());
+    new BitSlicedRangeIndexCreator(INDEX_DIR, new DimensionFieldSpec("foo", INT, false), 0, 10);
   }
 
   @Test
@@ -153,7 +150,7 @@ public class BitSlicedIndexCreatorTest {
   private void testInt(Dataset<int[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (int value : dataset.values()) {
         creator.add(value);
       }
@@ -162,26 +159,43 @@ public class BitSlicedIndexCreatorTest {
     File rangeIndexFile = new File(INDEX_DIR, metadata.getColumnName() + BITMAP_RANGE_INDEX_FILE_EXTENSION);
     try (PinotDataBuffer dataBuffer = PinotDataBuffer.mapReadOnlyBigEndianFile(rangeIndexFile)) {
       BitSlicedRangeIndexReader reader = new BitSlicedRangeIndexReader(dataBuffer, metadata);
-      int prev = Integer.MIN_VALUE;
-      for (int quantile : dataset.quantiles()) {
-        ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
-        ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
-        assertEquals(result, reference);
+      testRange(reader, dataset, Integer.MIN_VALUE, Integer.MIN_VALUE);
+      int[] quantiles = dataset.quantiles();
+      int prev = quantiles[0] - 1;
+      testRange(reader, dataset, Integer.MIN_VALUE, prev);
+      testRange(reader, dataset, prev, prev);
+      for (int quantile : quantiles) {
+        testRange(reader, dataset, prev, quantile);
+        testRange(reader, dataset, quantile, quantile);
         prev = quantile;
       }
-      ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Integer.MAX_VALUE);
-      assertTrue(result != null && result.isEmpty());
-      assertEquals(reader.getMatchingDocIds(Integer.MIN_VALUE, Integer.MAX_VALUE),
-          dataset.scan(Integer.MIN_VALUE, Integer.MAX_VALUE));
+      testRange(reader, dataset, prev, prev + 1);
+      testRange(reader, dataset, prev + 1, prev + 1);
+      testRange(reader, dataset, prev + 1, Integer.MAX_VALUE);
+      testRange(reader, dataset, Integer.MAX_VALUE, Integer.MAX_VALUE);
+      testRange(reader, dataset, Integer.MIN_VALUE, Integer.MAX_VALUE);
     } finally {
       FileUtils.forceDelete(rangeIndexFile);
+    }
+  }
+
+  private static void testRange(BitSlicedRangeIndexReader reader, Dataset<int[]> dataset, int min, int max) {
+    ImmutableRoaringBitmap reference = dataset.scan(min, max);
+    assertEquals(reader.getMatchingDocIds(min, max), reference);
+    assertEquals(reader.getNumMatchingDocs(min, max), reference.getCardinality());
+
+    // Also test reversed min/max value
+    if (min != max) {
+      reference = dataset.scan(max, min);
+      assertEquals(reader.getMatchingDocIds(max, min), reference);
+      assertEquals(reader.getNumMatchingDocs(max, min), reference.getCardinality());
     }
   }
 
   private void testLong(Dataset<long[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (long value : dataset.values()) {
         creator.add(value);
       }
@@ -190,26 +204,43 @@ public class BitSlicedIndexCreatorTest {
     File rangeIndexFile = new File(INDEX_DIR, metadata.getColumnName() + BITMAP_RANGE_INDEX_FILE_EXTENSION);
     try (PinotDataBuffer dataBuffer = PinotDataBuffer.mapReadOnlyBigEndianFile(rangeIndexFile)) {
       BitSlicedRangeIndexReader reader = new BitSlicedRangeIndexReader(dataBuffer, metadata);
-      long prev = Long.MIN_VALUE;
-      for (long quantile : dataset.quantiles()) {
-        ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
-        ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
-        assertEquals(result, reference);
+      testRange(reader, dataset, Long.MIN_VALUE, Long.MIN_VALUE);
+      long[] quantiles = dataset.quantiles();
+      long prev = quantiles[0] - 1;
+      testRange(reader, dataset, Long.MIN_VALUE, prev);
+      testRange(reader, dataset, prev, prev);
+      for (long quantile : quantiles) {
+        testRange(reader, dataset, prev, quantile);
+        testRange(reader, dataset, quantile, quantile);
         prev = quantile;
       }
-      ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Long.MAX_VALUE);
-      assertTrue(result != null && result.isEmpty());
-      assertEquals(reader.getMatchingDocIds(Long.MIN_VALUE, Long.MAX_VALUE),
-          dataset.scan(Long.MIN_VALUE, Long.MAX_VALUE));
+      testRange(reader, dataset, prev, prev + 1);
+      testRange(reader, dataset, prev + 1, prev + 1);
+      testRange(reader, dataset, prev + 1, Long.MAX_VALUE);
+      testRange(reader, dataset, Long.MAX_VALUE, Long.MAX_VALUE);
+      testRange(reader, dataset, Long.MIN_VALUE, Long.MAX_VALUE);
     } finally {
       FileUtils.forceDelete(rangeIndexFile);
+    }
+  }
+
+  private static void testRange(BitSlicedRangeIndexReader reader, Dataset<long[]> dataset, long min, long max) {
+    ImmutableRoaringBitmap reference = dataset.scan(min, max);
+    assertEquals(reader.getMatchingDocIds(min, max), reference);
+    assertEquals(reader.getNumMatchingDocs(min, max), reference.getCardinality());
+
+    // Also test reversed min/max value
+    if (min != max) {
+      reference = dataset.scan(max, min);
+      assertEquals(reader.getMatchingDocIds(max, min), reference);
+      assertEquals(reader.getNumMatchingDocs(max, min), reference.getCardinality());
     }
   }
 
   private void testFloat(Dataset<float[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (float value : dataset.values()) {
         creator.add(value);
       }
@@ -218,26 +249,43 @@ public class BitSlicedIndexCreatorTest {
     File rangeIndexFile = new File(INDEX_DIR, metadata.getColumnName() + BITMAP_RANGE_INDEX_FILE_EXTENSION);
     try (PinotDataBuffer dataBuffer = PinotDataBuffer.mapReadOnlyBigEndianFile(rangeIndexFile)) {
       BitSlicedRangeIndexReader reader = new BitSlicedRangeIndexReader(dataBuffer, metadata);
-      float prev = Float.NEGATIVE_INFINITY;
-      for (float quantile : dataset.quantiles()) {
-        ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
-        ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
-        assertEquals(result, reference);
+      testRange(reader, dataset, Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY);
+      float[] quantiles = dataset.quantiles();
+      float prev = quantiles[0] - 1;
+      testRange(reader, dataset, Float.NEGATIVE_INFINITY, prev);
+      testRange(reader, dataset, prev, prev);
+      for (float quantile : quantiles) {
+        testRange(reader, dataset, prev, quantile);
+        testRange(reader, dataset, quantile, quantile);
         prev = quantile;
       }
-      ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Float.POSITIVE_INFINITY);
-      assertTrue(result != null && result.isEmpty());
-      assertEquals(reader.getMatchingDocIds(Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY),
-          dataset.scan(Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY));
+      testRange(reader, dataset, prev, prev + 1);
+      testRange(reader, dataset, prev + 1, prev + 1);
+      testRange(reader, dataset, prev + 1, Float.POSITIVE_INFINITY);
+      testRange(reader, dataset, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY);
+      testRange(reader, dataset, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY);
     } finally {
       FileUtils.forceDelete(rangeIndexFile);
+    }
+  }
+
+  private static void testRange(BitSlicedRangeIndexReader reader, Dataset<float[]> dataset, float min, float max) {
+    ImmutableRoaringBitmap reference = dataset.scan(min, max);
+    assertEquals(reader.getMatchingDocIds(min, max), reference);
+    assertEquals(reader.getNumMatchingDocs(min, max), reference.getCardinality());
+
+    // Also test reversed min/max value
+    if (min != max) {
+      reference = dataset.scan(max, min);
+      assertEquals(reader.getMatchingDocIds(max, min), reference);
+      assertEquals(reader.getNumMatchingDocs(max, min), reference.getCardinality());
     }
   }
 
   private void testDouble(Dataset<double[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (double value : dataset.values()) {
         creator.add(value);
       }
@@ -246,20 +294,43 @@ public class BitSlicedIndexCreatorTest {
     File rangeIndexFile = new File(INDEX_DIR, metadata.getColumnName() + BITMAP_RANGE_INDEX_FILE_EXTENSION);
     try (PinotDataBuffer dataBuffer = PinotDataBuffer.mapReadOnlyBigEndianFile(rangeIndexFile)) {
       BitSlicedRangeIndexReader reader = new BitSlicedRangeIndexReader(dataBuffer, metadata);
-      double prev = Double.NEGATIVE_INFINITY;
-      for (double quantile : dataset.quantiles()) {
-        ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
-        ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
-        assertEquals(result, reference);
+      testRange(reader, dataset, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY);
+      double[] quantiles = dataset.quantiles();
+      double prev = quantiles[0] - 1;
+      testRange(reader, dataset, Double.NEGATIVE_INFINITY, prev);
+      testRange(reader, dataset, prev, prev);
+      for (double quantile : quantiles) {
+        testRange(reader, dataset, prev, quantile);
+        testRange(reader, dataset, quantile, quantile);
         prev = quantile;
       }
-      ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Double.POSITIVE_INFINITY);
-      assertTrue(result != null && result.isEmpty());
-      assertEquals(reader.getMatchingDocIds(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY),
-          dataset.scan(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY));
+      testRange(reader, dataset, prev, prev + 1);
+      testRange(reader, dataset, prev + 1, prev + 1);
+      testRange(reader, dataset, prev + 1, Double.POSITIVE_INFINITY);
+      testRange(reader, dataset, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY);
+      testRange(reader, dataset, Double.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY);
     } finally {
       FileUtils.forceDelete(rangeIndexFile);
     }
+  }
+
+  private static void testRange(BitSlicedRangeIndexReader reader, Dataset<double[]> dataset, double min, double max) {
+    ImmutableRoaringBitmap reference = dataset.scan(min, max);
+    assertEquals(reader.getMatchingDocIds(min, max), reference);
+    assertEquals(reader.getNumMatchingDocs(min, max), reference.getCardinality());
+
+    // Also test reversed min/max value
+    if (min != max) {
+      reference = dataset.scan(max, min);
+      assertEquals(reader.getMatchingDocIds(max, min), reference);
+      assertEquals(reader.getNumMatchingDocs(max, min), reference.getCardinality());
+    }
+  }
+
+  private static BitSlicedRangeIndexCreator newBitSlicedIndexCreator(ColumnMetadata metadata) {
+    return metadata.hasDictionary() ? new BitSlicedRangeIndexCreator(INDEX_DIR,
+        metadata.getFieldSpec(), metadata.getCardinality()) : new BitSlicedRangeIndexCreator(INDEX_DIR,
+        metadata.getFieldSpec(), metadata.getMinValue(), metadata.getMaxValue());
   }
 
   enum Distribution {

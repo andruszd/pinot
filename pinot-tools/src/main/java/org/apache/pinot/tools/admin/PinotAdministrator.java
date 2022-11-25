@@ -32,12 +32,15 @@ import org.apache.pinot.tools.admin.command.BootstrapTableCommand;
 import org.apache.pinot.tools.admin.command.ChangeNumReplicasCommand;
 import org.apache.pinot.tools.admin.command.ChangeTableState;
 import org.apache.pinot.tools.admin.command.CreateSegmentCommand;
+import org.apache.pinot.tools.admin.command.DataImportDryRunCommand;
 import org.apache.pinot.tools.admin.command.DeleteClusterCommand;
+import org.apache.pinot.tools.admin.command.FileSystemCommand;
 import org.apache.pinot.tools.admin.command.GenerateDataCommand;
 import org.apache.pinot.tools.admin.command.GitHubEventsQuickStartCommand;
 import org.apache.pinot.tools.admin.command.ImportDataCommand;
 import org.apache.pinot.tools.admin.command.JsonToPinotSchema;
 import org.apache.pinot.tools.admin.command.LaunchDataIngestionJobCommand;
+import org.apache.pinot.tools.admin.command.LaunchSparkDataIngestionJobCommand;
 import org.apache.pinot.tools.admin.command.MoveReplicaGroup;
 import org.apache.pinot.tools.admin.command.OfflineSegmentIntervalCheckerCommand;
 import org.apache.pinot.tools.admin.command.OperateClusterConfigCommand;
@@ -62,7 +65,6 @@ import org.apache.pinot.tools.admin.command.ValidateConfigCommand;
 import org.apache.pinot.tools.admin.command.VerifyClusterStateCommand;
 import org.apache.pinot.tools.admin.command.VerifySegmentState;
 import org.apache.pinot.tools.segment.converter.PinotSegmentConvertCommand;
-import org.apache.pinot.tools.segment.converter.SegmentMergeCommand;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -93,6 +95,7 @@ public class PinotAdministrator {
     SUBCOMMAND_MAP.put("OperateClusterConfig", new OperateClusterConfigCommand());
     SUBCOMMAND_MAP.put("GenerateData", new GenerateDataCommand());
     SUBCOMMAND_MAP.put("LaunchDataIngestionJob", new LaunchDataIngestionJobCommand());
+    SUBCOMMAND_MAP.put("LaunchSparkDataIngestionJob", new LaunchSparkDataIngestionJobCommand());
     SUBCOMMAND_MAP.put("CreateSegment", new CreateSegmentCommand());
     SUBCOMMAND_MAP.put("ImportData", new ImportDataCommand());
     SUBCOMMAND_MAP.put("StartZookeeper", new StartZookeeperCommand());
@@ -107,6 +110,7 @@ public class PinotAdministrator {
     SUBCOMMAND_MAP.put("ChangeTableState", new ChangeTableState());
     SUBCOMMAND_MAP.put("AddTenant", new AddTenantCommand());
     SUBCOMMAND_MAP.put("AddSchema", new AddSchemaCommand());
+    SUBCOMMAND_MAP.put("DataImportDryRun", new DataImportDryRunCommand());
     SUBCOMMAND_MAP.put("UpdateSchema", new AddSchemaCommand());
     SUBCOMMAND_MAP.put("UploadSegment", new UploadSegmentCommand());
     SUBCOMMAND_MAP.put("PostQuery", new PostQueryCommand());
@@ -123,24 +127,24 @@ public class PinotAdministrator {
     SUBCOMMAND_MAP.put("MoveReplicaGroup", new MoveReplicaGroup());
     SUBCOMMAND_MAP.put("VerifyClusterState", new VerifyClusterStateCommand());
     SUBCOMMAND_MAP.put("RealtimeProvisioningHelper", new RealtimeProvisioningHelperCommand());
-    SUBCOMMAND_MAP.put("MergeSegments", new SegmentMergeCommand());
     SUBCOMMAND_MAP.put("CheckOfflineSegmentIntervals", new OfflineSegmentIntervalCheckerCommand());
     SUBCOMMAND_MAP.put("AnonymizeData", new AnonymizeDataCommand());
     SUBCOMMAND_MAP.put("GitHubEventsQuickStart", new GitHubEventsQuickStartCommand());
     SUBCOMMAND_MAP.put("StreamGitHubEvents", new StreamGitHubEventsCommand());
     SUBCOMMAND_MAP.put("BootstrapTable", new BootstrapTableCommand());
     SUBCOMMAND_MAP.put("SegmentProcessorFramework", new SegmentProcessorFrameworkCommand());
+    SUBCOMMAND_MAP.put("FileSystem", new FileSystemCommand());
   }
 
   @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false,
       description = "Print this message.")
-  boolean _help = false;
+  private boolean _help = false;
 
   @CommandLine.Option(names = {"-version", "-v", "--v", "--version"}, required = false,
       description = "Print the version of Pinot package.")
-  boolean _version = false;
+  private boolean _version = false;
 
-  int _status = 0;
+  private int _status = 1;
 
   public void execute(String[] args) {
     try {
@@ -192,9 +196,9 @@ public class PinotAdministrator {
     PluginManager.get().init();
     PinotAdministrator pinotAdministrator = new PinotAdministrator();
     pinotAdministrator.execute(args);
-    if (System.getProperties().getProperty("pinot.admin.system.exit", "false").equalsIgnoreCase("true")) {
-      // If status is true, cmd was successfully, so return 0 from process.
-      System.exit(pinotAdministrator._status);
+    if ((pinotAdministrator._status != 0)
+        && Boolean.parseBoolean(System.getProperties().getProperty("pinot.admin.system.exit"))) {
+        System.exit(pinotAdministrator._status);
     }
   }
 }

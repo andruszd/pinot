@@ -23,22 +23,25 @@ import java.io.File;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import kafka.server.KafkaConfig;
 import kafka.server.KafkaServer;
 import org.apache.commons.io.FileUtils;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.RecordsToDelete;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Time;
 import scala.Option;
-import scala.collection.JavaConverters;
-import scala.collection.Seq;
 
 
 public final class MiniKafkaCluster implements Closeable {
-  private static final File TEMP_DIR = new File(FileUtils.getTempDirectory(), "MiniKafkaCluster");
+  private static final File TEMP_DIR = new File(FileUtils.getTempDirectory(), "MiniKafkaCluster-" + UUID.randomUUID());
 
   private final EmbeddedZooKeeper _zkServer;
   private final KafkaServer _kafkaServer;
@@ -51,8 +54,7 @@ public final class MiniKafkaCluster implements Closeable {
     _zkServer = new EmbeddedZooKeeper();
     int kafkaServerPort = getAvailablePort();
     KafkaConfig kafkaBrokerConfig = new KafkaConfig(createBrokerConfig(brokerId, kafkaServerPort));
-    Seq seq = JavaConverters.collectionAsScalaIterableConverter(Collections.emptyList()).asScala().toSeq();
-    _kafkaServer = new KafkaServer(kafkaBrokerConfig, Time.SYSTEM, Option.empty(), seq);
+    _kafkaServer = new KafkaServer(kafkaBrokerConfig, Time.SYSTEM, Option.empty(), false);
     _kafkaServerAddress = "localhost:" + kafkaServerPort;
     Properties kafkaClientConfig = new Properties();
     kafkaClientConfig.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, _kafkaServerAddress);
@@ -79,13 +81,11 @@ public final class MiniKafkaCluster implements Closeable {
     props.put("port", Integer.toString(port));
     props.put("log.dir", new File(TEMP_DIR, "log").getPath());
     props.put("zookeeper.connect", _zkServer.getZkAddress());
-    props.put("replica.socket.timeout.ms", "1500");
-    props.put("controller.socket.timeout.ms", "1500");
+    props.put("zookeeper.session.timeout.ms", "30000");
     props.put("controlled.shutdown.enable", "true");
     props.put("delete.topic.enable", "true");
     props.put("auto.create.topics.enable", "true");
     props.put("offsets.topic.replication.factor", "1");
-    props.put("controlled.shutdown.retry.backoff.ms", "100");
     props.put("log.cleaner.dedupe.buffer.size", "2097152");
     return props;
   }
@@ -115,5 +115,11 @@ public final class MiniKafkaCluster implements Closeable {
   public void deleteTopic(String topicName)
       throws ExecutionException, InterruptedException {
     _adminClient.deleteTopics(Collections.singletonList(topicName)).all().get();
+  }
+
+  public void deleteRecordsBeforeOffset(String topicName, int partitionId, long offset) {
+    Map<TopicPartition, RecordsToDelete> recordsToDelete = new HashMap<>();
+    recordsToDelete.put(new TopicPartition(topicName, partitionId), RecordsToDelete.beforeOffset(offset));
+    _adminClient.deleteRecords(recordsToDelete);
   }
 }

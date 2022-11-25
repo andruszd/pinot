@@ -22,6 +22,8 @@ import java.io.File;
 import java.net.URI;
 import java.util.List;
 import java.util.Random;
+import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.retry.RetryPolicies;
@@ -36,7 +38,6 @@ public abstract class BaseSegmentFetcher implements SegmentFetcher {
   public static final String RETRY_COUNT_CONFIG_KEY = "retry.count";
   public static final String RETRY_WAIT_MS_CONFIG_KEY = "retry.wait.ms";
   public static final String RETRY_DELAY_SCALE_FACTOR_CONFIG_KEY = "retry.delay.scale.factor";
-  public static final String AUTH_TOKEN = CommonConstants.KEY_OF_AUTH_TOKEN;
   public static final int DEFAULT_RETRY_COUNT = 3;
   public static final int DEFAULT_RETRY_WAIT_MS = 100;
   public static final int DEFAULT_RETRY_DELAY_SCALE_FACTOR = 5;
@@ -46,14 +47,14 @@ public abstract class BaseSegmentFetcher implements SegmentFetcher {
   protected int _retryCount;
   protected int _retryWaitMs;
   protected int _retryDelayScaleFactor;
-  protected String _authToken;
+  protected AuthProvider _authProvider;
 
   @Override
   public void init(PinotConfiguration config) {
     _retryCount = config.getProperty(RETRY_COUNT_CONFIG_KEY, DEFAULT_RETRY_COUNT);
     _retryWaitMs = config.getProperty(RETRY_WAIT_MS_CONFIG_KEY, DEFAULT_RETRY_WAIT_MS);
     _retryDelayScaleFactor = config.getProperty(RETRY_DELAY_SCALE_FACTOR_CONFIG_KEY, DEFAULT_RETRY_DELAY_SCALE_FACTOR);
-    _authToken = config.getProperty(AUTH_TOKEN);
+    _authProvider = AuthProviderUtils.extractAuthProvider(config, CommonConstants.KEY_OF_AUTH);
     doInit(config);
     _logger
         .info("Initialized with retryCount: {}, retryWaitMs: {}, retryDelayScaleFactor: {}", _retryCount, _retryWaitMs,
@@ -84,8 +85,8 @@ public abstract class BaseSegmentFetcher implements SegmentFetcher {
   @Override
   public void fetchSegmentToLocal(List<URI> uris, File dest)
       throws Exception {
-    if (uris == null) {
-      throw new IllegalArgumentException("The input uri list is empty");
+    if (uris == null || uris.isEmpty()) {
+      throw new IllegalArgumentException("The input uri list is null or empty");
     }
     Random r = new Random();
     RetryPolicies.exponentialBackoffRetryPolicy(_retryCount, _retryWaitMs, _retryDelayScaleFactor).attempt(() -> {
@@ -99,6 +100,11 @@ public abstract class BaseSegmentFetcher implements SegmentFetcher {
         return false;
       }
     });
+  }
+
+  public File fetchUntarSegmentToLocalStreamed(URI uri, File dest, long rateLimit)
+      throws Exception {
+    throw new UnsupportedOperationException();
   }
 
   /**

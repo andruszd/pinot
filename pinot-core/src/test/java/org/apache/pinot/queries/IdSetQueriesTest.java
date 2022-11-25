@@ -26,12 +26,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.response.broker.AggregationResult;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
-import org.apache.pinot.common.response.broker.GroupByResult;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
-import org.apache.pinot.core.operator.query.AggregationGroupByOperator;
+import org.apache.pinot.core.operator.blocks.results.AggregationResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.GroupByResultsBlock;
 import org.apache.pinot.core.operator.query.AggregationOperator;
+import org.apache.pinot.core.operator.query.GroupByOperator;
 import org.apache.pinot.core.query.aggregation.groupby.AggregationGroupByResult;
 import org.apache.pinot.core.query.aggregation.groupby.GroupKeyGenerator;
 import org.apache.pinot.core.query.utils.idset.BloomFilterIdSet;
@@ -53,7 +52,6 @@ import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
-import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -93,8 +91,7 @@ public class IdSetQueriesTest extends BaseQueriesTest {
       .addSingleValueDimension(BYTES_COLUMN, DataType.BYTES).addMultiValueDimension(INT_MV_COLUMN, DataType.INT)
       .addMultiValueDimension(LONG_MV_COLUMN, DataType.LONG).addMultiValueDimension(FLOAT_MV_COLUMN, DataType.FLOAT)
       .addMultiValueDimension(DOUBLE_MV_COLUMN, DataType.DOUBLE)
-      .addMultiValueDimension(STRING_MV_COLUMN, DataType.STRING)
-      .build();
+      .addMultiValueDimension(STRING_MV_COLUMN, DataType.STRING).build();
   private static final TableConfig TABLE_CONFIG =
       new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).build();
 
@@ -162,21 +159,49 @@ public class IdSetQueriesTest extends BaseQueriesTest {
   }
 
   @Test
+  public void testCastMV() {
+    String query = "SELECT IDSET(CAST(stringMVColumn AS LONG)) FROM testTable";
+    AggregationOperator aggregationOperator = getOperator(query);
+    AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
+    QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), NUM_RECORDS, 0,
+        NUM_RECORDS, NUM_RECORDS);
+    List<Object> aggregationResult = resultsBlock.getResults();
+    assertNotNull(aggregationResult);
+    assertEquals(aggregationResult.size(), 1);
+    // bloom filter should not be used
+    assertTrue(aggregationResult.get(0) instanceof Roaring64NavigableMapIdSet);
+    Roaring64NavigableMapIdSet idSet = (Roaring64NavigableMapIdSet) aggregationResult.get(0);
+    for (int i = 0; i < NUM_RECORDS; i++) {
+      // cast MV column should be used to create the ID_SET
+      assertTrue(idSet.contains(Long.parseLong(Integer.toString(_values[i]))));
+      assertTrue(idSet.contains(Long.parseLong(Integer.toString(_values[i]) + MAX_VALUE)));
+      Exception e = null;
+      try {
+        // ID_SET applied to different types should fail
+        idSet.contains(Integer.toString(_values[i]));
+        idSet.contains(Integer.toString(_values[i]) + MAX_VALUE);
+      } catch (Exception exception) {
+        e = exception;
+      }
+      assertNotNull(e);
+    }
+  }
+
+  @Test
   public void testAggregationOnly()
       throws IOException {
     String query =
         "SELECT IDSET(intColumn), IDSET(longColumn), IDSET(floatColumn), IDSET(doubleColumn), IDSET(stringColumn), "
             + "IDSET(bytesColumn), IDSET(intMVColumn), IDSET(longMVColumn), IDSET(floatMVColumn), "
             + "IDSET(doubleMVColumn), IDSET(stringMVColumn) FROM testTable";
-
     // Inner segment
     {
       // Without filter
-      AggregationOperator aggregationOperator = getOperatorForPqlQuery(query);
-      IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
+      AggregationOperator aggregationOperator = getOperator(query);
+      AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
       QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), NUM_RECORDS, 0,
           11 * NUM_RECORDS, NUM_RECORDS);
-      List<Object> aggregationResult = resultsBlock.getAggregationResult();
+      List<Object> aggregationResult = resultsBlock.getResults();
       assertNotNull(aggregationResult);
       assertEquals(aggregationResult.size(), 11);
       RoaringBitmapIdSet intIdSet = (RoaringBitmapIdSet) aggregationResult.get(0);
@@ -231,11 +256,11 @@ public class IdSetQueriesTest extends BaseQueriesTest {
     }
     {
       // With filter
-      AggregationOperator aggregationOperator = getOperatorForPqlQueryWithFilter(query);
-      IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
-      QueriesTestUtils
-          .testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), 0, 0, 0, NUM_RECORDS);
-      List<Object> aggregationResult = resultsBlock.getAggregationResult();
+      AggregationOperator aggregationOperator = getOperatorWithFilter(query);
+      AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
+      QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), 0, 0, 0,
+          NUM_RECORDS);
+      List<Object> aggregationResult = resultsBlock.getResults();
       assertNotNull(aggregationResult);
       assertEquals(aggregationResult.size(), 11);
       for (int i = 0; i < 11; i++) {
@@ -246,69 +271,60 @@ public class IdSetQueriesTest extends BaseQueriesTest {
     // Inter segments
     {
       // Without filter (expect 4 * inner segment result)
-      BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(query);
-      Assert.assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * 11 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
-      List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
-      Assert.assertEquals(aggregationResults.size(), 11);
-      RoaringBitmapIdSet intIdSet =
-          (RoaringBitmapIdSet) IdSets.fromBase64String((String) aggregationResults.get(0).getValue());
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
+      assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
+      assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
+      assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * 11 * NUM_RECORDS);
+      assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
+      Object[] aggregationResults = brokerResponse.getResultTable().getRows().get(0);
+      assertEquals(aggregationResults.length, 11);
+      RoaringBitmapIdSet intIdSet = (RoaringBitmapIdSet) IdSets.fromBase64String((String) aggregationResults[0]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(intIdSet.contains(_values[i]));
       }
       Roaring64NavigableMapIdSet longIdSet =
-          (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) aggregationResults.get(1).getValue());
+          (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) aggregationResults[1]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(longIdSet.contains(_values[i] + (long) Integer.MAX_VALUE));
       }
-      BloomFilterIdSet floatIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(2).getValue());
+      BloomFilterIdSet floatIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[2]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(floatIdSet.contains(_values[i] + 0.5f));
       }
-      BloomFilterIdSet doubleIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(3).getValue());
+      BloomFilterIdSet doubleIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[3]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(doubleIdSet.contains(_values[i] + 0.25));
       }
-      BloomFilterIdSet stringIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(4).getValue());
+      BloomFilterIdSet stringIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[4]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(stringIdSet.contains(Integer.toString(_values[i])));
       }
-      BloomFilterIdSet bytesIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(5).getValue());
+      BloomFilterIdSet bytesIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[5]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(bytesIdSet.contains(Integer.toString(_values[i]).getBytes()));
       }
-      RoaringBitmapIdSet intMVIdSet =
-          (RoaringBitmapIdSet) IdSets.fromBase64String((String) aggregationResults.get(6).getValue());
+      RoaringBitmapIdSet intMVIdSet = (RoaringBitmapIdSet) IdSets.fromBase64String((String) aggregationResults[6]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(intMVIdSet.contains(_values[i]));
         assertTrue(intMVIdSet.contains(_values[i] + MAX_VALUE));
       }
       Roaring64NavigableMapIdSet longMVIdSet =
-          (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) aggregationResults.get(7).getValue());
+          (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) aggregationResults[7]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(longMVIdSet.contains(_values[i] + (long) Integer.MAX_VALUE));
         assertTrue(longMVIdSet.contains(_values[i] + (long) Integer.MAX_VALUE + MAX_VALUE));
       }
-      BloomFilterIdSet floatMVIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(8).getValue());
+      BloomFilterIdSet floatMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[8]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(floatMVIdSet.contains(_values[i] + 0.5f));
         assertTrue(floatMVIdSet.contains(_values[i] + 0.5f + MAX_VALUE));
       }
-      BloomFilterIdSet doubleMVIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(9).getValue());
+      BloomFilterIdSet doubleMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[9]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(doubleMVIdSet.contains(_values[i] + 0.25));
         assertTrue(doubleMVIdSet.contains(_values[i] + 0.25 + MAX_VALUE));
       }
-      BloomFilterIdSet stringMVIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(10).getValue());
+      BloomFilterIdSet stringMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[10]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(stringMVIdSet.contains(Integer.toString(_values[i])));
         assertTrue(stringMVIdSet.contains(Integer.toString(_values[i]) + MAX_VALUE));
@@ -316,15 +332,15 @@ public class IdSetQueriesTest extends BaseQueriesTest {
     }
     {
       // With filter
-      BrokerResponseNative brokerResponse = getBrokerResponseForPqlQueryWithFilter(query);
-      Assert.assertEquals(brokerResponse.getNumDocsScanned(), 0);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 0);
-      Assert.assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
-      List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
-      Assert.assertEquals(aggregationResults.size(), 11);
+      BrokerResponseNative brokerResponse = getBrokerResponseWithFilter(query);
+      assertEquals(brokerResponse.getNumDocsScanned(), 0);
+      assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
+      assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 0);
+      assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
+      Object[] aggregationResults = brokerResponse.getResultTable().getRows().get(0);
+      assertEquals(aggregationResults.length, 11);
       for (int i = 0; i < 6; i++) {
-        assertTrue(IdSets.fromBase64String((String) aggregationResults.get(i).getValue()) instanceof EmptyIdSet);
+        assertTrue(IdSets.fromBase64String((String) aggregationResults[i]) instanceof EmptyIdSet);
       }
     }
   }
@@ -332,18 +348,16 @@ public class IdSetQueriesTest extends BaseQueriesTest {
   @Test
   public void testAggregationGroupBy()
       throws IOException {
-    String query =
-        "SELECT IDSET(intColumn), IDSET(longColumn), IDSET(floatColumn), IDSET(doubleColumn), IDSET(stringColumn), "
-            + "IDSET(bytesColumn), IDSET(intMVColumn), IDSET(longMVColumn), IDSET(floatMVColumn), "
-            + "IDSET(doubleMVColumn), IDSET(stringMVColumn) FROM testTable GROUP BY 1";
+    String query = "SELECT IDSET(intColumn), IDSET(longColumn), IDSET(floatColumn), IDSET(doubleColumn), "
+        + "IDSET(stringColumn), IDSET(bytesColumn), IDSET(intMVColumn), IDSET(longMVColumn), IDSET(floatMVColumn), "
+        + "IDSET(doubleMVColumn), IDSET(stringMVColumn) FROM testTable GROUP BY '1'";
 
     // Inner segment
     {
-      AggregationGroupByOperator aggregationGroupByOperator = getOperatorForPqlQuery(query);
-      IntermediateResultsBlock resultsBlock = aggregationGroupByOperator.nextBlock();
-      QueriesTestUtils
-          .testInnerSegmentExecutionStatistics(aggregationGroupByOperator.getExecutionStatistics(), NUM_RECORDS, 0,
-              11 * NUM_RECORDS, NUM_RECORDS);
+      GroupByOperator groupByOperator = getOperator(query);
+      GroupByResultsBlock resultsBlock = groupByOperator.nextBlock();
+      QueriesTestUtils.testInnerSegmentExecutionStatistics(groupByOperator.getExecutionStatistics(), NUM_RECORDS, 0,
+          11 * NUM_RECORDS, NUM_RECORDS);
       AggregationGroupByResult aggregationGroupByResult = resultsBlock.getAggregationGroupByResult();
       assertNotNull(aggregationGroupByResult);
       Iterator<GroupKeyGenerator.GroupKey> groupKeyIterator = aggregationGroupByResult.getGroupKeyIterator();
@@ -404,74 +418,61 @@ public class IdSetQueriesTest extends BaseQueriesTest {
 
     // Inter segments (expect 4 * inner segment result)
     {
-      BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(query);
-      Assert.assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * 11 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
-      List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
-      Assert.assertEquals(aggregationResults.size(), 11);
-      for (AggregationResult aggregationResult : aggregationResults) {
-        Assert.assertNull(aggregationResult.getValue());
-        List<GroupByResult> groupByResults = aggregationResult.getGroupByResult();
-        assertEquals(groupByResults.size(), 1);
-      }
-      RoaringBitmapIdSet intIdSet = (RoaringBitmapIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(0).getGroupByResult().get(0).getValue());
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
+      assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
+      assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
+      assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * 11 * NUM_RECORDS);
+      assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
+      List<Object[]> rows = brokerResponse.getResultTable().getRows();
+      assertEquals(rows.size(), 1);
+      Object[] results = brokerResponse.getResultTable().getRows().get(0);
+      assertEquals(results.length, 11);
+      RoaringBitmapIdSet intIdSet = (RoaringBitmapIdSet) IdSets.fromBase64String((String) results[0]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(intIdSet.contains(_values[i]));
       }
-      Roaring64NavigableMapIdSet longIdSet = (Roaring64NavigableMapIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(1).getGroupByResult().get(0).getValue());
+      Roaring64NavigableMapIdSet longIdSet = (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) results[1]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(longIdSet.contains(_values[i] + (long) Integer.MAX_VALUE));
       }
-      BloomFilterIdSet floatIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(2).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet floatIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[2]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(floatIdSet.contains(_values[i] + 0.5f));
       }
-      BloomFilterIdSet doubleIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(3).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet doubleIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[3]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(doubleIdSet.contains(_values[i] + 0.25));
       }
-      BloomFilterIdSet stringIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(4).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet stringIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[4]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(stringIdSet.contains(Integer.toString(_values[i])));
       }
-      BloomFilterIdSet bytesIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(5).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet bytesIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[5]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(bytesIdSet.contains(Integer.toString(_values[i]).getBytes()));
       }
-      RoaringBitmapIdSet intMVIdSet = (RoaringBitmapIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(6).getGroupByResult().get(0).getValue());
+      RoaringBitmapIdSet intMVIdSet = (RoaringBitmapIdSet) IdSets.fromBase64String((String) results[6]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(intMVIdSet.contains(_values[i]));
         assertTrue(intMVIdSet.contains(_values[i] + MAX_VALUE));
       }
-      Roaring64NavigableMapIdSet longMVIdSet = (Roaring64NavigableMapIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(7).getGroupByResult().get(0).getValue());
+      Roaring64NavigableMapIdSet longMVIdSet =
+          (Roaring64NavigableMapIdSet) IdSets.fromBase64String((String) results[7]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(longMVIdSet.contains(_values[i] + (long) Integer.MAX_VALUE));
         assertTrue(longMVIdSet.contains(_values[i] + (long) Integer.MAX_VALUE + MAX_VALUE));
       }
-      BloomFilterIdSet floatMVIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(8).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet floatMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[8]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(floatMVIdSet.contains(_values[i] + 0.5f));
         assertTrue(floatMVIdSet.contains(_values[i] + 0.5f + MAX_VALUE));
       }
-      BloomFilterIdSet doubleMVIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(9).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet doubleMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[9]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(doubleMVIdSet.contains(_values[i] + 0.25));
         assertTrue(doubleMVIdSet.contains(_values[i] + 0.25 + MAX_VALUE));
       }
-      BloomFilterIdSet stringMVIdSet = (BloomFilterIdSet) IdSets
-          .fromBase64String((String) aggregationResults.get(10).getGroupByResult().get(0).getValue());
+      BloomFilterIdSet stringMVIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) results[10]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(stringMVIdSet.contains(Integer.toString(_values[i])));
         assertTrue(stringMVIdSet.contains(Integer.toString(_values[i]) + MAX_VALUE));
@@ -486,11 +487,11 @@ public class IdSetQueriesTest extends BaseQueriesTest {
 
     // Inner segment
     {
-      AggregationOperator aggregationOperator = getOperatorForPqlQuery(query);
-      IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
+      AggregationOperator aggregationOperator = getOperator(query);
+      AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
       QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), NUM_RECORDS, 0,
           NUM_RECORDS, NUM_RECORDS);
-      List<Object> aggregationResult = resultsBlock.getAggregationResult();
+      List<Object> aggregationResult = resultsBlock.getResults();
       assertNotNull(aggregationResult);
       assertEquals(aggregationResult.size(), 1);
       // Should directly create BloomFilterIdSet
@@ -504,16 +505,15 @@ public class IdSetQueriesTest extends BaseQueriesTest {
 
     // Inter segments (expect 4 * inner segment result)
     {
-      BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(query);
-      Assert.assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
-      Assert.assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * NUM_RECORDS);
-      Assert.assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
-      List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
-      Assert.assertEquals(aggregationResults.size(), 1);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
+      assertEquals(brokerResponse.getNumDocsScanned(), 4 * NUM_RECORDS);
+      assertEquals(brokerResponse.getNumEntriesScannedInFilter(), 0);
+      assertEquals(brokerResponse.getNumEntriesScannedPostFilter(), 4 * NUM_RECORDS);
+      assertEquals(brokerResponse.getTotalDocs(), 4 * NUM_RECORDS);
+      Object[] aggregationResults = brokerResponse.getResultTable().getRows().get(0);
+      assertEquals(aggregationResults.length, 1);
       // Should directly create BloomFilterIdSet
-      BloomFilterIdSet intIdSet =
-          (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults.get(0).getValue());
+      BloomFilterIdSet intIdSet = (BloomFilterIdSet) IdSets.fromBase64String((String) aggregationResults[0]);
       for (int i = 0; i < NUM_RECORDS; i++) {
         assertTrue(intIdSet.contains(_values[i]));
       }
@@ -542,12 +542,11 @@ public class IdSetQueriesTest extends BaseQueriesTest {
 
     {
       String query = "SELECT COUNT(*) FROM testTable where INIDSET(intColumn, '" + serializedIdSet + "') = 1";
-      AggregationOperator aggregationOperator = getOperatorForPqlQuery(query);
-      IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
-      QueriesTestUtils
-          .testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(), expectedNumMatchingRecords,
-              NUM_RECORDS, 0, NUM_RECORDS);
-      List<Object> aggregationResult = resultsBlock.getAggregationResult();
+      AggregationOperator aggregationOperator = getOperator(query);
+      AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
+      QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(),
+          expectedNumMatchingRecords, NUM_RECORDS, 0, NUM_RECORDS);
+      List<Object> aggregationResult = resultsBlock.getResults();
       assertNotNull(aggregationResult);
       assertEquals(aggregationResult.size(), 1);
       assertEquals((long) aggregationResult.get(0), expectedNumMatchingRecords);
@@ -555,11 +554,11 @@ public class IdSetQueriesTest extends BaseQueriesTest {
 
     {
       String query = "SELECT COUNT(*) FROM testTable where IN_ID_SET(intColumn, '" + serializedIdSet + "') = 0";
-      AggregationOperator aggregationOperator = getOperatorForPqlQuery(query);
-      IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
+      AggregationOperator aggregationOperator = getOperator(query);
+      AggregationResultsBlock resultsBlock = aggregationOperator.nextBlock();
       QueriesTestUtils.testInnerSegmentExecutionStatistics(aggregationOperator.getExecutionStatistics(),
           NUM_RECORDS - expectedNumMatchingRecords, NUM_RECORDS, 0, NUM_RECORDS);
-      List<Object> aggregationResult = resultsBlock.getAggregationResult();
+      List<Object> aggregationResult = resultsBlock.getResults();
       assertNotNull(aggregationResult);
       assertEquals(aggregationResult.size(), 1);
       assertEquals((long) aggregationResult.get(0), NUM_RECORDS - expectedNumMatchingRecords);

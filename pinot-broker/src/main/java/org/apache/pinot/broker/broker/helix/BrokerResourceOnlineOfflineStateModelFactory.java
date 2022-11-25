@@ -20,15 +20,15 @@ package org.apache.pinot.broker.broker.helix;
 
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.NotificationContext;
-import org.apache.helix.ZNRecord;
 import org.apache.helix.model.Message;
 import org.apache.helix.participant.statemachine.StateModel;
 import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelInfo;
 import org.apache.helix.participant.statemachine.Transition;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.broker.queryquota.HelixExternalViewBasedQueryQuotaManager;
-import org.apache.pinot.broker.routing.RoutingManager;
+import org.apache.pinot.broker.routing.BrokerRoutingManager;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.slf4j.Logger;
@@ -48,11 +48,11 @@ public class BrokerResourceOnlineOfflineStateModelFactory extends StateModelFact
 
   private final ZkHelixPropertyStore<ZNRecord> _propertyStore;
   private final HelixDataAccessor _helixDataAccessor;
-  private final RoutingManager _routingManager;
+  private final BrokerRoutingManager _routingManager;
   private final HelixExternalViewBasedQueryQuotaManager _queryQuotaManager;
 
   public BrokerResourceOnlineOfflineStateModelFactory(ZkHelixPropertyStore<ZNRecord> propertyStore,
-      HelixDataAccessor helixDataAccessor, RoutingManager routingManager,
+      HelixDataAccessor helixDataAccessor, BrokerRoutingManager routingManager,
       HelixExternalViewBasedQueryQuotaManager queryQuotaManager) {
     _helixDataAccessor = helixDataAccessor;
     _propertyStore = propertyStore;

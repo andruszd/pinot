@@ -22,15 +22,17 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
-import java.io.ByteArrayInputStream;
+import it.unimi.dsi.fastutil.doubles.DoubleArrayList;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.EnumSet;
+import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.BytesUtils;
@@ -47,6 +49,12 @@ public class DataSchema {
   private final String[] _columnNames;
   private final ColumnDataType[] _columnDataTypes;
   private ColumnDataType[] _storedColumnDataTypes;
+
+  /** Used by both Broker and Server to generate results for EXPLAIN PLAN queries. */
+  public static final DataSchema EXPLAIN_RESULT_SCHEMA =
+      new DataSchema(new String[]{"Operator", "Operator_Id", "Parent_Id"}, new ColumnDataType[]{
+          ColumnDataType.STRING, ColumnDataType.INT, ColumnDataType.INT
+      });
 
   @JsonCreator
   public DataSchema(@JsonProperty("columnNames") String[] columnNames,
@@ -75,16 +83,21 @@ public class DataSchema {
     return _columnDataTypes;
   }
 
+  /**
+   * Lazy compute the _storeColumnDataTypes field.
+   */
   @JsonIgnore
   public ColumnDataType[] getStoredColumnDataTypes() {
-    if (_storedColumnDataTypes == null) {
+    ColumnDataType[] storedColumnDataTypes = _storedColumnDataTypes;
+    if (storedColumnDataTypes == null) {
       int numColumns = _columnDataTypes.length;
-      _storedColumnDataTypes = new ColumnDataType[numColumns];
+      storedColumnDataTypes = new ColumnDataType[numColumns];
       for (int i = 0; i < numColumns; i++) {
-        _storedColumnDataTypes[i] = _columnDataTypes[i].getStoredType();
+        storedColumnDataTypes[i] = _columnDataTypes[i].getStoredType();
       }
+      _storedColumnDataTypes = storedColumnDataTypes;
     }
-    return _storedColumnDataTypes;
+    return storedColumnDataTypes;
   }
 
   /**
@@ -118,29 +131,34 @@ public class DataSchema {
    * <code>LONG</code>.
    * <p>NOTE: The given data schema should be type compatible with this one.
    *
+   * @param originalSchema the original Data schema
    * @param anotherDataSchema Data schema to cover
    */
-  public void upgradeToCover(DataSchema anotherDataSchema) {
-    int numColumns = _columnDataTypes.length;
+  public static DataSchema upgradeToCover(DataSchema originalSchema, DataSchema anotherDataSchema) {
+    int numColumns = originalSchema._columnDataTypes.length;
+    ColumnDataType[] columnDataTypes = new ColumnDataType[numColumns];
     for (int i = 0; i < numColumns; i++) {
-      ColumnDataType thisColumnDataType = _columnDataTypes[i];
+      ColumnDataType thisColumnDataType = originalSchema._columnDataTypes[i];
       ColumnDataType thatColumnDataType = anotherDataSchema._columnDataTypes[i];
       if (thisColumnDataType != thatColumnDataType) {
         if (thisColumnDataType.isArray()) {
           if (thisColumnDataType.isWholeNumberArray() && thatColumnDataType.isWholeNumberArray()) {
-            _columnDataTypes[i] = ColumnDataType.LONG_ARRAY;
+            columnDataTypes[i] = ColumnDataType.LONG_ARRAY;
           } else {
-            _columnDataTypes[i] = ColumnDataType.DOUBLE_ARRAY;
+            columnDataTypes[i] = ColumnDataType.DOUBLE_ARRAY;
           }
         } else {
           if (thisColumnDataType.isWholeNumber() && thatColumnDataType.isWholeNumber()) {
-            _columnDataTypes[i] = ColumnDataType.LONG;
+            columnDataTypes[i] = ColumnDataType.LONG;
           } else {
-            _columnDataTypes[i] = ColumnDataType.DOUBLE;
+            columnDataTypes[i] = ColumnDataType.DOUBLE;
           }
         }
+      } else {
+        columnDataTypes[i] = originalSchema._columnDataTypes[i];
       }
     }
+    return new DataSchema(originalSchema._columnNames, columnDataTypes);
   }
 
   public byte[] toBytes()
@@ -170,35 +188,29 @@ public class DataSchema {
     return byteArrayOutputStream.toByteArray();
   }
 
-  public static DataSchema fromBytes(byte[] buffer)
+  /**
+   * This method use relative operations on the ByteBuffer and expects the buffer's position to be set correctly.
+   */
+  public static DataSchema fromBytes(ByteBuffer buffer)
       throws IOException {
-    ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(buffer);
-    DataInputStream dataInputStream = new DataInputStream(byteArrayInputStream);
-
     // Read the number of columns.
-    int numColumns = dataInputStream.readInt();
+    int numColumns = buffer.getInt();
     String[] columnNames = new String[numColumns];
     ColumnDataType[] columnDataTypes = new ColumnDataType[numColumns];
-
     // Read the column names.
-    int readLength;
     for (int i = 0; i < numColumns; i++) {
-      int length = dataInputStream.readInt();
+      int length = buffer.getInt();
       byte[] bytes = new byte[length];
-      readLength = dataInputStream.read(bytes);
-      assert readLength == length;
+      buffer.get(bytes);
       columnNames[i] = new String(bytes, UTF_8);
     }
-
     // Read the column types.
     for (int i = 0; i < numColumns; i++) {
-      int length = dataInputStream.readInt();
+      int length = buffer.getInt();
       byte[] bytes = new byte[length];
-      readLength = dataInputStream.read(bytes);
-      assert readLength == length;
+      buffer.get(bytes);
       columnDataTypes[i] = ColumnDataType.valueOf(new String(bytes, UTF_8));
     }
-
     return new DataSchema(columnNames, columnDataTypes);
   }
 
@@ -227,8 +239,8 @@ public class DataSchema {
     }
     if (anObject instanceof DataSchema) {
       DataSchema anotherDataSchema = (DataSchema) anObject;
-      return Arrays.equals(_columnNames, anotherDataSchema._columnNames) && Arrays
-          .equals(_columnDataTypes, anotherDataSchema._columnDataTypes);
+      return Arrays.equals(_columnNames, anotherDataSchema._columnNames) && Arrays.equals(_columnDataTypes,
+          anotherDataSchema._columnDataTypes);
     }
     return false;
   }
@@ -239,46 +251,60 @@ public class DataSchema {
   }
 
   public enum ColumnDataType {
-    INT,
-    LONG,
-    FLOAT,
-    DOUBLE,
-    BOOLEAN /* Stored as INT */,
-    TIMESTAMP /* Stored as LONG */,
-    STRING,
-    JSON /* Stored as STRING */,
-    BYTES,
-    OBJECT,
-    INT_ARRAY,
-    LONG_ARRAY,
-    FLOAT_ARRAY,
-    DOUBLE_ARRAY,
-    BOOLEAN_ARRAY /* Stored as INT_ARRAY */,
-    TIMESTAMP_ARRAY /* Stored as LONG_ARRAY */,
-    BYTES_ARRAY,
-    STRING_ARRAY;
+    INT(0),
+    LONG(0L),
+    FLOAT(0f),
+    DOUBLE(0d),
+    BIG_DECIMAL(BigDecimal.ZERO),
+    BOOLEAN(INT, 0),
+    TIMESTAMP(LONG, 0L),
+    STRING(""),
+    JSON(STRING, ""),
+    BYTES(new ByteArray(new byte[0])),
+    OBJECT(null),
+    INT_ARRAY(new int[0]),
+    LONG_ARRAY(new long[0]),
+    FLOAT_ARRAY(new float[0]),
+    DOUBLE_ARRAY(new double[0]),
+    BOOLEAN_ARRAY(INT_ARRAY, new int[0]),
+    TIMESTAMP_ARRAY(LONG_ARRAY, new long[0]),
+    STRING_ARRAY(new String[0]),
+    BYTES_ARRAY(new byte[0][]);
 
-    private static final EnumSet<ColumnDataType> NUMERIC_TYPES = EnumSet.of(INT, LONG, FLOAT, DOUBLE);
+    private static final EnumSet<ColumnDataType> NUMERIC_TYPES = EnumSet.of(INT, LONG, FLOAT, DOUBLE, BIG_DECIMAL);
     private static final EnumSet<ColumnDataType> INTEGRAL_TYPES = EnumSet.of(INT, LONG);
-    private static final EnumSet<ColumnDataType> ARRAY_TYPES = EnumSet.of(INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY,
-        DOUBLE_ARRAY, STRING_ARRAY, BOOLEAN_ARRAY, TIMESTAMP_ARRAY, BYTES_ARRAY);
-    private static final EnumSet<ColumnDataType> NUMERIC_ARRAY_TYPES = EnumSet.of(INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY,
-        DOUBLE_ARRAY);
+    private static final EnumSet<ColumnDataType> ARRAY_TYPES =
+        EnumSet.of(INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY, DOUBLE_ARRAY, STRING_ARRAY, BOOLEAN_ARRAY, TIMESTAMP_ARRAY,
+            BYTES_ARRAY);
+    private static final EnumSet<ColumnDataType> NUMERIC_ARRAY_TYPES =
+        EnumSet.of(INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY, DOUBLE_ARRAY);
     private static final EnumSet<ColumnDataType> INTEGRAL_ARRAY_TYPES = EnumSet.of(INT_ARRAY, LONG_ARRAY);
+
+    // stored data type.
+    private final ColumnDataType _storedColumnDataType;
+
+    // Placeholder for null. We need a placeholder for null so that it can be serialized in the data table
+    private final Object _nullPlaceholder;
+
+    ColumnDataType(Object nullPlaceHolder) {
+      _storedColumnDataType = this;
+      _nullPlaceholder = nullPlaceHolder;
+    }
+
+    ColumnDataType(ColumnDataType storedColumnDataType, Object nullPlaceHolder) {
+      _storedColumnDataType = storedColumnDataType;
+      _nullPlaceholder = nullPlaceHolder;
+    }
+
+    public Object getNullPlaceholder() {
+      return _nullPlaceholder;
+    }
+
     /**
      * Returns the data type stored in Pinot.
      */
     public ColumnDataType getStoredType() {
-      switch (this) {
-        case BOOLEAN:
-          return INT;
-        case TIMESTAMP:
-          return LONG;
-        case JSON:
-          return STRING;
-        default:
-          return this;
-      }
+      return _storedColumnDataType;
     }
 
     public boolean isNumber() {
@@ -317,6 +343,8 @@ public class DataSchema {
           return DataType.FLOAT;
         case DOUBLE:
           return DataType.DOUBLE;
+        case BIG_DECIMAL:
+          return DataType.BIG_DECIMAL;
         case BOOLEAN:
           return DataType.BOOLEAN;
         case TIMESTAMP:
@@ -346,6 +374,8 @@ public class DataSchema {
           return ((Number) value).floatValue();
         case DOUBLE:
           return ((Number) value).doubleValue();
+        case BIG_DECIMAL:
+          return (BigDecimal) value;
         case BOOLEAN:
           return (Integer) value == 1;
         case TIMESTAMP:
@@ -381,6 +411,8 @@ public class DataSchema {
      */
     public Serializable format(Object value) {
       switch (this) {
+        case BIG_DECIMAL:
+          return ((BigDecimal) value).toPlainString();
         case TIMESTAMP:
           assert value instanceof Timestamp;
           return value.toString();
@@ -404,6 +436,8 @@ public class DataSchema {
           return ((Number) value).floatValue();
         case DOUBLE:
           return ((Number) value).doubleValue();
+        case BIG_DECIMAL:
+          return (BigDecimal) value;
         case BOOLEAN:
           return (Integer) value == 1;
         case TIMESTAMP:
@@ -437,6 +471,8 @@ public class DataSchema {
     private static double[] toDoubleArray(Object value) {
       if (value instanceof double[]) {
         return (double[]) value;
+      } else if (value instanceof DoubleArrayList) {
+        return ((DoubleArrayList) value).elements();
       } else if (value instanceof int[]) {
         int[] intValues = (int[]) value;
         int length = intValues.length;
@@ -515,6 +551,8 @@ public class DataSchema {
           return FLOAT;
         case DOUBLE:
           return DOUBLE;
+        case BIG_DECIMAL:
+          return BIG_DECIMAL;
         case BOOLEAN:
           return BOOLEAN;
         case TIMESTAMP:
@@ -540,12 +578,12 @@ public class DataSchema {
           return FLOAT_ARRAY;
         case DOUBLE:
           return DOUBLE_ARRAY;
-        case STRING:
-          return STRING_ARRAY;
         case BOOLEAN:
           return BOOLEAN_ARRAY;
         case TIMESTAMP:
           return TIMESTAMP_ARRAY;
+        case STRING:
+          return STRING_ARRAY;
         case BYTES:
           return BYTES_ARRAY;
         default:

@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.segment.local.segment.creator.impl.fwd;
 
+import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import org.apache.pinot.segment.local.io.writer.impl.BaseChunkSVForwardIndexWriter;
@@ -74,8 +75,8 @@ public class MultiValueVarByteRawIndexCreator implements ForwardIndexCreator {
       int totalDocs, DataType valueType, int writerVersion, int maxRowLengthInBytes, int maxNumberOfElements)
       throws IOException {
     //we will prepend the actual content with numElements and length array containing length of each element
-    int maxLengthPrefixes = Integer.BYTES * maxNumberOfElements;
-    int totalMaxLength = Integer.BYTES + maxRowLengthInBytes + maxLengthPrefixes;
+    int totalMaxLength = getTotalRowStorageBytes(maxNumberOfElements, maxRowLengthInBytes);
+
     File file = new File(baseIndexDir,
         column + Indexes.RAW_MV_FORWARD_INDEX_FILE_EXTENSION);
     int numDocsPerChunk = Math.max(
@@ -115,5 +116,56 @@ public class MultiValueVarByteRawIndexCreator implements ForwardIndexCreator {
   public void close()
       throws IOException {
     _indexWriter.close();
+  }
+
+  /**
+   * The actual content in an MV array is prepended with 2 prefixes:
+   * 1. elementLengthStoragePrefixInBytes - bytes required to store the length of each element in the largest array
+   * 2. numElementsStoragePrefixInBytes - Number of elements in the array
+   *
+   * This function returns the total bytes needed to store (1) elementLengthStoragePrefixInBytes
+   */
+  public static int getElementLengthStoragePrefixInBytes(int maxNumberOfElements) {
+    return Integer.BYTES * maxNumberOfElements;
+  }
+
+  /**
+   * The actual content in an MV array is prepended with 2 prefixes:
+   * 1. elementLengthStoragePrefixInBytes - bytes required to store the length of each element in the largest array
+   * 2. numElementsStoragePrefixInBytes - Number of elements in the array
+   *
+   * This function returns the bytes needed to store (2) numElementsStoragePrefixInBytes
+   */
+  public static int getNumElementsStoragePrefix() {
+    return Integer.BYTES;
+  }
+
+  /**
+   * The actual content in an MV array is prepended with 2 prefixes:
+   * 1. elementLengthStoragePrefixInBytes - bytes required to store the length of each element in the largest array
+   * 2. numElementsStoragePrefixInBytes - Number of elements in the array
+   *
+   * This function returns the bytes needed to store the (1), (2) and the actual content.
+   */
+  public static int getTotalRowStorageBytes(int maxNumberOfElements, int maxRowDataLengthInBytes) {
+    int elementLengthStoragePrefixInBytes = getElementLengthStoragePrefixInBytes(maxNumberOfElements);
+    int numElementsStoragePrefixInBytes = getNumElementsStoragePrefix();
+    int totalMaxLength = elementLengthStoragePrefixInBytes + numElementsStoragePrefixInBytes + maxRowDataLengthInBytes;
+    Preconditions.checkArgument(
+        (elementLengthStoragePrefixInBytes | maxRowDataLengthInBytes | totalMaxLength | maxNumberOfElements) > 0,
+        "integer overflow detected");
+
+    return totalMaxLength;
+  }
+
+  /**
+   * The actual content in an MV array is prepended with 2 prefixes:
+   * 1. elementLengthStoragePrefixInBytes - bytes required to store the length of each element in the largest array
+   * 2. numberOfElementsStoragePrefix - Number of elements in the array
+   *
+   * This function returns the bytes needed to store the actual content.
+   */
+  public static int getMaxRowDataLengthInBytes(int totalMaxLength, int maxNumberOfElements) {
+    return totalMaxLength - getNumElementsStoragePrefix() - getElementLengthStoragePrefixInBytes(maxNumberOfElements);
   }
 }

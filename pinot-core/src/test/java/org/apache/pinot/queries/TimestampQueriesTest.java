@@ -40,6 +40,7 @@ import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.exception.BadQueryRequestException;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.annotations.AfterClass;
@@ -122,7 +123,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
   public void testQueries() {
     {
       String query = "SELECT * FROM testTable";
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema,
@@ -137,7 +138,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
     }
     {
       String query = "SELECT * FROM testTable ORDER BY timestampColumn DESC LIMIT 40";
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema,
@@ -157,7 +158,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
       String query =
           "SELECT FROM_TIMESTAMP(timestampColumn) AS longTimestamp FROM testTable WHERE timestampColumn > '2021-01-01"
               + " 00:00:00.123' AND timestampColumn >= " + (BASE_TIMESTAMP + 234);
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema,
@@ -172,7 +173,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
     }
     {
       String query = "SELECT DISTINCT timestampColumn FROM testTable ORDER BY timestampColumn";
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema,
@@ -189,7 +190,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
       String query =
           "SELECT COUNT(*) AS count, timestampColumn FROM testTable GROUP BY timestampColumn ORDER BY timestampColumn"
               + " DESC";
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema, new DataSchema(new String[]{"count", "timestampColumn"},
@@ -207,7 +208,7 @@ public class TimestampQueriesTest extends BaseQueriesTest {
       String query =
           "SELECT TO_TIMESTAMP(MAX(timestampColumn)) AS maxTimestamp FROM testTable GROUP BY timestampColumn HAVING "
               + "maxTimestamp < '2021-01-01 00:00:00.005' ORDER BY maxTimestamp";
-      BrokerResponseNative brokerResponse = getBrokerResponseForSqlQuery(query);
+      BrokerResponseNative brokerResponse = getBrokerResponse(query);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
       assertEquals(dataSchema,
@@ -220,6 +221,17 @@ public class TimestampQueriesTest extends BaseQueriesTest {
         assertEquals(row[0], new Timestamp(BASE_TIMESTAMP + i).toString());
       }
     }
+  }
+
+  @Test(
+      expectedExceptions = BadQueryRequestException.class,
+      expectedExceptionsMessageRegExp = ".*attimezone not found.*"
+  )
+  public void shouldThrowOnAtTimeZone() {
+    // this isn't yet implemented but the syntax is supported, make sure the
+    // degradation experience is clean
+    String query = "SELECT timestampColumn AT TIME ZONE 'pst' FROM testTable";
+    getBrokerResponse(query);
   }
 
   @AfterClass

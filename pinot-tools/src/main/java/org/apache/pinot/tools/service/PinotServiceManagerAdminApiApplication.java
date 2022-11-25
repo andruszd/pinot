@@ -58,29 +58,27 @@ public class PinotServiceManagerAdminApiApplication extends ResourceConfig {
     Preconditions.checkArgument(httpPort > 0);
     _baseUri = URI.create("http://0.0.0.0:" + httpPort + "/");
     _httpServer = GrizzlyHttpServerFactory.createHttpServer(_baseUri, this);
-    synchronized (PinotReflectionUtils.getReflectionLock()) {
-      setupSwagger();
-    }
+    PinotReflectionUtils.runWithLock(this::setupSwagger);
   }
 
   private void setupSwagger() {
     BeanConfig beanConfig = new BeanConfig();
     beanConfig.setTitle("Pinot Starter API");
     beanConfig.setDescription("APIs for accessing Pinot Starter information");
-    beanConfig.setContact("https://github.com/apache/incubator-pinot");
+    beanConfig.setContact("https://github.com/apache/pinot");
     beanConfig.setVersion("1.0");
     beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
     beanConfig.setBasePath(_baseUri.getPath());
     beanConfig.setResourcePackage(RESOURCE_PACKAGE);
     beanConfig.setScan(true);
-
+    beanConfig.setExpandSuperTypes(false);
     HttpHandler httpHandler =
         new CLStaticHttpHandler(PinotServiceManagerAdminApiApplication.class.getClassLoader(), "/api/");
     // map both /api and /help to swagger docs. /api because it looks nice. /help for backward compatibility
     _httpServer.getServerConfiguration().addHttpHandler(httpHandler, "/api/", "/help/");
 
     URL swaggerDistLocation = PinotServiceManagerAdminApiApplication.class.getClassLoader()
-        .getResource("META-INF/resources/webjars/swagger-ui/3.18.2/");
+        .getResource("META-INF/resources/webjars/swagger-ui/3.23.11/");
     CLStaticHttpHandler swaggerDist = new CLStaticHttpHandler(new URLClassLoader(new URL[]{swaggerDistLocation}));
     _httpServer.getServerConfiguration().addHttpHandler(swaggerDist, "/swaggerui-dist/");
   }

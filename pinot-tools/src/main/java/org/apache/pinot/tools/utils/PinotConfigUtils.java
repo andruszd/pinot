@@ -32,6 +32,7 @@ import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.lang.StringUtils;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.ControllerConf.ControllerPeriodicTasksConf;
+import org.apache.pinot.query.service.QueryConfig;
 import org.apache.pinot.spi.env.CommonsConfigurationUtils;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -149,7 +150,7 @@ public class PinotConfigUtils {
   }
 
   public static Map<String, Object> generateBrokerConf(String clusterName, String zkAddress, String brokerHost,
-      int brokerPort)
+      int brokerPort, int brokerMultiStageRunnerPort)
       throws SocketException, UnknownHostException {
     Map<String, Object> properties = new HashMap<>();
     properties.put(CommonConstants.Helix.CONFIG_OF_CLUSTER_NAME, clusterName);
@@ -157,11 +158,14 @@ public class PinotConfigUtils {
     properties.put(CommonConstants.Broker.CONFIG_OF_BROKER_HOSTNAME,
         !StringUtils.isEmpty(brokerHost) ? brokerHost : NetUtils.getHostAddress());
     properties.put(CommonConstants.Helix.KEY_OF_BROKER_QUERY_PORT, brokerPort != 0 ? brokerPort : getAvailablePort());
+    properties.put(QueryConfig.KEY_OF_QUERY_RUNNER_PORT, brokerMultiStageRunnerPort != 0
+        ? brokerMultiStageRunnerPort : getAvailablePort());
     return properties;
   }
 
   public static Map<String, Object> generateServerConf(String clusterName, String zkAddress, String serverHost,
-      int serverPort, int serverAdminPort, String serverDataDir, String serverSegmentDir)
+      int serverPort, int serverAdminPort, int serverGrpcPort, int serverMultiStageServerPort,
+      int serverMultiStageRunnerPort, String serverDataDir, String serverSegmentDir)
       throws SocketException, UnknownHostException {
     if (serverHost == null) {
       serverHost = NetUtils.getHostAddress();
@@ -183,7 +187,12 @@ public class PinotConfigUtils {
     properties.put(CommonConstants.Helix.CONFIG_OF_ZOOKEEPR_SERVER, zkAddress);
     properties.put(CommonConstants.Helix.KEY_OF_SERVER_NETTY_HOST, serverHost);
     properties.put(CommonConstants.Helix.KEY_OF_SERVER_NETTY_PORT, serverPort);
+    properties.put(QueryConfig.KEY_OF_QUERY_SERVER_PORT, serverMultiStageServerPort != 0
+        ? serverMultiStageServerPort : getAvailablePort());
+    properties.put(QueryConfig.KEY_OF_QUERY_RUNNER_PORT, serverMultiStageRunnerPort != 0
+        ? serverMultiStageRunnerPort : getAvailablePort());
     properties.put(CommonConstants.Server.CONFIG_OF_ADMIN_API_PORT, serverAdminPort);
+    properties.put(CommonConstants.Server.CONFIG_OF_GRPC_PORT, serverGrpcPort);
     properties.put(CommonConstants.Server.CONFIG_OF_INSTANCE_DATA_DIR, serverDataDir);
     properties.put(CommonConstants.Server.CONFIG_OF_INSTANCE_SEGMENT_TAR_DIR, serverSegmentDir);
 
@@ -217,18 +226,18 @@ public class PinotConfigUtils {
 
   private static List<String> validateControllerAccessProtocols(ControllerConf conf)
       throws ConfigurationException {
-    List<String> protocols = conf.getControllerAccessProtocols();
+    List<String> listeners = conf.getControllerAccessProtocols();
 
-    if (!protocols.isEmpty()) {
-      Optional<String> invalidProtocol =
-          protocols.stream().filter(protocol -> !protocol.equals("http") && !protocol.equals("https")).findFirst();
+    if (!listeners.isEmpty()) {
+      Optional<String> invalidProtocol = listeners.stream().filter(name -> !isValidProtocol(name) && !isValidProtocol(
+          conf.getControllerAccessProtocolProperty(name, "protocol"))).findFirst();
 
       if (invalidProtocol.isPresent()) {
         throw new ConfigurationException(String.format(CONTROLLER_CONFIG_VALIDATION_ERROR_MESSAGE_FORMAT,
             invalidProtocol.get() + " is not a valid protocol for the 'controller.access.protocols' property."));
       }
 
-      Optional<ConfigurationException> invalidPort = protocols.stream()
+      Optional<ConfigurationException> invalidPort = listeners.stream()
           .map(protocol -> validatePort(protocol, conf.getControllerAccessProtocolProperty(protocol, "port")))
 
           .filter(Optional::isPresent)
@@ -242,14 +251,18 @@ public class PinotConfigUtils {
       }
     }
 
-    return protocols;
+    return listeners;
+  }
+
+  private static boolean isValidProtocol(String protocol) {
+    return "http".equals(protocol) || "https".equals(protocol);
   }
 
   private static Optional<ConfigurationException> validatePort(String protocol, String port) {
     if (port == null) {
       return Optional.of(new ConfigurationException(String.format(CONTROLLER_CONFIG_VALIDATION_ERROR_MESSAGE_FORMAT,
           "missing controller " + protocol + " port, please fix 'controller.access.protocols." + protocol
-              + ".port' property in config file.")));
+              + ".port' property in the config file.")));
     }
 
     try {
@@ -257,7 +270,7 @@ public class PinotConfigUtils {
     } catch (NumberFormatException e) {
       return Optional.of(new ConfigurationException(String.format(CONTROLLER_CONFIG_VALIDATION_ERROR_MESSAGE_FORMAT,
           port + " is not a valid port, please fix 'controller.access.protocols." + protocol
-              + ".port' property in config file.")));
+              + ".port' property in the config file.")));
     }
 
     return Optional.empty();

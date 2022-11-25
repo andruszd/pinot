@@ -30,10 +30,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.common.utils.HLCSegmentName;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.common.utils.SegmentName;
+import org.apache.pinot.core.util.QueryOptionsUtils;
 import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel;
 
 
@@ -50,20 +50,17 @@ import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateM
  * </ul>
  */
 public class RealtimeSegmentSelector implements SegmentSelector {
-  public static final String ROUTING_OPTIONS_KEY = "routingOptions";
-  public static final String FORCE_HLC = "FORCE_HLC";
-
   private final AtomicLong _requestId = new AtomicLong();
   private volatile List<Set<String>> _hlcSegments;
   private volatile Set<String> _llcSegments;
 
   @Override
-  public void init(ExternalView externalView, IdealState idealState, Set<String> onlineSegments) {
-    onExternalViewChange(externalView, idealState, onlineSegments);
+  public void init(IdealState idealState, ExternalView externalView, Set<String> onlineSegments) {
+    onAssignmentChange(idealState, externalView, onlineSegments);
   }
 
   @Override
-  public void onExternalViewChange(ExternalView externalView, IdealState idealState, Set<String> onlineSegments) {
+  public void onAssignmentChange(IdealState idealState, ExternalView externalView, Set<String> onlineSegments) {
     // Group HLC segments by their group id
     // NOTE: Use TreeMap so that group ids are sorted and the result is deterministic
     Map<String, Set<String>> groupIdToHLCSegmentsMap = new TreeMap<>();
@@ -151,16 +148,8 @@ public class RealtimeSegmentSelector implements SegmentSelector {
     }
 
     // Handle HLC and LLC coexisting scenario, select HLC segments only if it is forced in the routing options
-    PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-    Map<String, String> debugOptions =
-        pinotQuery != null ? pinotQuery.getDebugOptions() : brokerRequest.getDebugOptions();
-    if (debugOptions != null) {
-      String routingOptions = debugOptions.get(ROUTING_OPTIONS_KEY);
-      if (routingOptions != null && routingOptions.toUpperCase().contains(FORCE_HLC)) {
-        return selectHLCSegments();
-      }
-    }
-    return selectLLCSegments();
+    return QueryOptionsUtils.isRoutingForceHLC(brokerRequest.getPinotQuery().getQueryOptions()) ? selectHLCSegments()
+        : selectLLCSegments();
   }
 
   private Set<String> selectHLCSegments() {

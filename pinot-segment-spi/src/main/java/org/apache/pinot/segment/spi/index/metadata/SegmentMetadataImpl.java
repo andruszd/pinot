@@ -45,15 +45,19 @@ import org.apache.commons.configuration.Configuration;
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.SegmentMetadata;
+import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.V1Constants.MetadataKeys.Segment;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Constants;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
+import org.apache.pinot.segment.spi.store.ColumnIndexType;
+import org.apache.pinot.segment.spi.store.ColumnIndexUtils;
 import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.CommonsConfigurationUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.TimeUtils;
+import org.apache.pinot.spi.utils.TimestampIndexUtils;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Duration;
@@ -84,6 +88,15 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   private int _totalDocs;
   private final Map<String, String> _customMap = new HashMap<>();
 
+  // Fields specific to realtime table
+  private String _startOffset;
+  private String _endOffset;
+
+  // TODO: No need to cache this. We cannot modify the metadata if it is from a input stream
+  // Caching properties around can be costly when the number of segments is high according to the
+  // finding in PR #2996. So for now, caching is used only when initializing from input streams.
+  private PropertiesConfiguration _segmentMetadataPropertiesConfiguration = null;
+
   @Deprecated
   private String _rawTableName;
 
@@ -96,13 +109,13 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     _columnMetadataMap = new HashMap<>();
     _schema = new Schema();
 
-    PropertiesConfiguration segmentMetadataPropertiesConfiguration =
-        CommonsConfigurationUtils.fromInputStream(metadataPropertiesInputStream);
-    init(segmentMetadataPropertiesConfiguration);
+    // Caching properties when initializing from input streams.
+    _segmentMetadataPropertiesConfiguration = CommonsConfigurationUtils.fromInputStream(metadataPropertiesInputStream);
+    init(_segmentMetadataPropertiesConfiguration);
     loadCreationMeta(creationMetaInputStream);
 
-    setTimeInfo(segmentMetadataPropertiesConfiguration);
-    _totalDocs = segmentMetadataPropertiesConfiguration.getInt(Segment.SEGMENT_TOTAL_DOCS);
+    setTimeInfo(_segmentMetadataPropertiesConfiguration);
+    _totalDocs = _segmentMetadataPropertiesConfiguration.getInt(Segment.SEGMENT_TOTAL_DOCS);
   }
 
   /**
@@ -137,6 +150,11 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     _segmentName = segmentName;
     _schema = schema;
     _creationTime = creationTime;
+  }
+
+  public PropertiesConfiguration getPropertiesConfiguration() {
+    return (_segmentMetadataPropertiesConfiguration != null) ? _segmentMetadataPropertiesConfiguration
+        : SegmentMetadataImpl.getPropertiesConfiguration(_indexDir);
   }
 
   public static PropertiesConfiguration getPropertiesConfiguration(File indexDir) {
@@ -230,6 +248,26 @@ public class SegmentMetadataImpl implements SegmentMetadata {
       _schema.addField(columnMetadata.getFieldSpec());
     }
 
+    // Load index metadata
+    // Support V3 (e.g. SingleFileIndexDirectory only)
+    if (_segmentVersion == SegmentVersion.v3) {
+      File indexMapFile = new File(_indexDir, "v3" + File.separator + V1Constants.INDEX_MAP_FILE_NAME);
+      if (indexMapFile.exists()) {
+        PropertiesConfiguration mapConfig = CommonsConfigurationUtils.fromFile(indexMapFile);
+        for (String key : CommonsConfigurationUtils.getKeys(mapConfig)) {
+          try {
+            String[] parsedKeys = ColumnIndexUtils.parseIndexMapKeys(key, _indexDir.getPath());
+            if (parsedKeys[2].equals(ColumnIndexUtils.MAP_KEY_NAME_SIZE)) {
+              ColumnIndexType columnIndexType = ColumnIndexType.getValue(parsedKeys[1]);
+              _columnMetadataMap.get(parsedKeys[0]).getIndexSizeMap().put(columnIndexType, mapConfig.getLong(key));
+            }
+          } catch (Exception e) {
+            LOGGER.debug("Unable to load index metadata in {} for {}!", indexMapFile, key, e);
+          }
+        }
+      }
+    }
+
     // Build star-tree v2 metadata
     int starTreeV2Count =
         segmentMetadataPropertiesConfiguration.getInt(StarTreeV2Constants.MetadataKey.STAR_TREE_COUNT, 0);
@@ -240,6 +278,10 @@ public class SegmentMetadataImpl implements SegmentMetadata {
             segmentMetadataPropertiesConfiguration.subset(StarTreeV2Constants.MetadataKey.getStarTreePrefix(i))));
       }
     }
+
+    // Set start/end offset if available
+    _startOffset = segmentMetadataPropertiesConfiguration.getString(Segment.Realtime.START_OFFSET, null);
+    _endOffset = segmentMetadataPropertiesConfiguration.getString(Segment.Realtime.END_OFFSET, null);
 
     // Set custom configs from metadata properties
     setCustomConfigs(segmentMetadataPropertiesConfiguration, _customMap);
@@ -261,7 +303,11 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   private static void addPhysicalColumns(List src, Collection<String> dest) {
     for (Object o : src) {
       String column = o.toString();
-      if (!column.isEmpty() && column.charAt(0) != '$' && !dest.contains(column)) {
+      if (!column.isEmpty() && !dest.contains(column)) {
+        // Skip virtual columns starting with '$', but keep time column with granularity as physical column
+        if (column.charAt(0) == '$' && !TimestampIndexUtils.isValidColumnWithGranularity(column)) {
+          continue;
+        }
         dest.add(column);
       }
     }
@@ -364,6 +410,16 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   }
 
   @Override
+  public String getStartOffset() {
+    return _startOffset;
+  }
+
+  @Override
+  public String getEndOffset() {
+    return _endOffset;
+  }
+
+  @Override
   public Map<String, ColumnMetadata> getColumnMetadataMap() {
     return _columnMetadataMap;
   }
@@ -387,6 +443,8 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     dateFormat.setTimeZone(timeZone);
     String creationTimeStr = _creationTime != Long.MIN_VALUE ? dateFormat.format(new Date(_creationTime)) : null;
     segmentMetadata.put("creationTimeReadable", creationTimeStr);
+    segmentMetadata.put("timeColumn", _timeColumn);
+    segmentMetadata.put("timeUnit", _timeUnit != null ? _timeUnit.name() : null);
     segmentMetadata.put("timeGranularitySec", _timeGranularity != null ? _timeGranularity.getStandardSeconds() : null);
     if (_timeInterval == null) {
       segmentMetadata.set("startTimeMillis", null);
@@ -402,12 +460,16 @@ public class SegmentMetadataImpl implements SegmentMetadata {
 
     segmentMetadata.put("segmentVersion", ((_segmentVersion != null) ? _segmentVersion.toString() : null));
     segmentMetadata.put("creatorName", _creatorName);
+    segmentMetadata.put("totalDocs", _totalDocs);
 
     ObjectNode customConfigs = JsonUtils.newObjectNode();
     for (String key : _customMap.keySet()) {
       customConfigs.put(key, _customMap.get(key));
     }
     segmentMetadata.set("custom", customConfigs);
+
+    segmentMetadata.put("startOffset", _startOffset);
+    segmentMetadata.put("endOffset", _endOffset);
 
     if (_columnMetadataMap != null) {
       ArrayNode columnsMetadata = JsonUtils.newArrayNode();

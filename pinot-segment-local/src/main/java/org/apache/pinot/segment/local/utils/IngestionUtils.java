@@ -29,6 +29,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.request.context.RequestContextUtils;
 import org.apache.pinot.segment.local.function.FunctionEvaluator;
 import org.apache.pinot.segment.local.function.FunctionEvaluatorFactory;
 import org.apache.pinot.segment.local.recordtransformer.ComplexTypeTransformer;
@@ -38,8 +41,9 @@ import org.apache.pinot.segment.spi.creator.name.FixedSegmentNameGenerator;
 import org.apache.pinot.segment.spi.creator.name.NormalizedDateSegmentNameGenerator;
 import org.apache.pinot.segment.spi.creator.name.SegmentNameGenerator;
 import org.apache.pinot.segment.spi.creator.name.SimpleSegmentNameGenerator;
-import org.apache.pinot.spi.auth.AuthContext;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.ingestion.AggregationConfig;
 import org.apache.pinot.spi.config.table.ingestion.BatchIngestionConfig;
 import org.apache.pinot.spi.config.table.ingestion.ComplexTypeConfig;
 import org.apache.pinot.spi.config.table.ingestion.FilterConfig;
@@ -154,16 +158,16 @@ public final class IngestionUtils {
         if (timeColumnName != null) {
           DateTimeFieldSpec dateTimeFieldSpec = schema.getSpecForTimeColumn(timeColumnName);
           if (dateTimeFieldSpec != null) {
-            dateTimeFormatSpec = new DateTimeFormatSpec(dateTimeFieldSpec.getFormat());
+            dateTimeFormatSpec = dateTimeFieldSpec.getFormatSpec();
           }
         }
         return new NormalizedDateSegmentNameGenerator(rawTableName, batchConfig.getSegmentNamePrefix(),
             batchConfig.isExcludeSequenceId(), pushType, pushFrequency, dateTimeFormatSpec,
-            batchConfig.getSegmentNamePostfix());
+            batchConfig.getSegmentNamePostfix(), batchConfig.isAppendUUIDToSegmentName());
 
       case BatchConfigProperties.SegmentNameGeneratorType.SIMPLE:
-        return new SimpleSegmentNameGenerator(rawTableName, batchConfig.getSegmentNamePostfix());
-
+        return new SimpleSegmentNameGenerator(rawTableName, batchConfig.getSegmentNamePostfix(),
+            batchConfig.isAppendUUIDToSegmentName());
       default:
         throw new IllegalStateException(String
             .format("Unsupported segmentNameGeneratorType: %s for table: %s", segmentNameGeneratorType,
@@ -188,13 +192,14 @@ public final class IngestionUtils {
    * @param tableNameWithType name of the table to upload the segment
    * @param batchConfig batchConfig with details about push such as controllerURI, pushAttempts, pushParallelism, etc
    * @param segmentTarURIs list of URI for the segment tar files
-   * @param authContext auth details required to upload the Pinot segment to controller
+   * @param authProvider auth provider
    */
   public static void uploadSegment(String tableNameWithType, BatchConfig batchConfig, List<URI> segmentTarURIs,
-      @Nullable AuthContext authContext)
+      @Nullable AuthProvider authProvider)
       throws Exception {
 
-    SegmentGenerationJobSpec segmentUploadSpec = generateSegmentUploadSpec(tableNameWithType, batchConfig, authContext);
+    SegmentGenerationJobSpec segmentUploadSpec = generateSegmentUploadSpec(tableNameWithType, batchConfig,
+        authProvider);
 
     List<String> segmentTarURIStrs = segmentTarURIs.stream().map(URI::toString).collect(Collectors.toList());
     String pushMode = batchConfig.getPushMode();
@@ -234,9 +239,8 @@ public final class IngestionUtils {
             outputSegmentDirURI = URI.create(batchConfig.getOutputSegmentDirURI());
           }
           PinotFS outputFileFS = getOutputPinotFS(batchConfig, outputSegmentDirURI);
-          Map<String, String> segmentUriToTarPathMap = SegmentPushUtils
-              .getSegmentUriToTarPathMap(outputSegmentDirURI, segmentUploadSpec.getPushJobSpec().getSegmentUriPrefix(),
-                  segmentUploadSpec.getPushJobSpec().getSegmentUriSuffix(), new String[]{segmentTarURIs.toString()});
+          Map<String, String> segmentUriToTarPathMap = SegmentPushUtils.getSegmentUriToTarPathMap(outputSegmentDirURI,
+              segmentUploadSpec.getPushJobSpec(), segmentTarURIStrs.toArray(new String[0]));
           SegmentPushUtils.sendSegmentUriAndMetadata(segmentUploadSpec, outputFileFS, segmentUriToTarPathMap);
         } catch (RetriableOperationException | AttemptsExceededException e) {
           throw new RuntimeException(String
@@ -250,7 +254,7 @@ public final class IngestionUtils {
   }
 
   private static SegmentGenerationJobSpec generateSegmentUploadSpec(String tableName, BatchConfig batchConfig,
-      @Nullable AuthContext authContext) {
+      @Nullable AuthProvider authProvider) {
 
     TableSpec tableSpec = new TableSpec();
     tableSpec.setTableName(tableName);
@@ -270,9 +274,8 @@ public final class IngestionUtils {
     spec.setPushJobSpec(pushJobSpec);
     spec.setTableSpec(tableSpec);
     spec.setPinotClusterSpecs(pinotClusterSpecs);
-    if (authContext != null && StringUtils.isNotBlank(authContext.getAuthToken())) {
-      spec.setAuthToken(authContext.getAuthToken());
-    }
+    spec.setAuthToken(AuthProviderUtils.toStaticToken(authProvider));
+
     return spec;
   }
 
@@ -300,8 +303,8 @@ public final class IngestionUtils {
    * TableConfig and Schema
    * Fields for ingestion come from 2 places:
    * 1. The schema
-   * 2. The ingestion config in the table config. The ingestion config (e.g. filter) can have fields which are not in
-   * the schema.
+   * 2. The ingestion config in the table config. The ingestion config (e.g. filter, complexType) can have fields which
+   * are not in the schema.
    */
   public static Set<String> getFieldsForRecordExtractor(@Nullable IngestionConfig ingestionConfig, Schema schema) {
     Set<String> fieldsForRecordExtractor = new HashSet<>();
@@ -361,6 +364,14 @@ public final class IngestionUtils {
           fields.addAll(functionEvaluator.getArguments());
         }
       }
+      List<AggregationConfig> aggregationConfigs = ingestionConfig.getAggregationConfigs();
+      if (aggregationConfigs != null) {
+        for (AggregationConfig aggregationConfig : aggregationConfigs) {
+          ExpressionContext expressionContext =
+              RequestContextUtils.getExpression(aggregationConfig.getAggregationFunction());
+          expressionContext.getColumns(fields);
+        }
+      }
       List<TransformConfig> transformConfigs = ingestionConfig.getTransformConfigs();
       if (transformConfigs != null) {
         for (TransformConfig transformConfig : transformConfigs) {
@@ -371,6 +382,10 @@ public final class IngestionUtils {
               .getColumnName()); // add the column itself too, so that if it is already transformed, we won't
           // transform again
         }
+      }
+      ComplexTypeConfig complexTypeConfig = ingestionConfig.getComplexTypeConfig();
+      if (complexTypeConfig != null && complexTypeConfig.getFieldsToUnnest() != null) {
+        fields.addAll(complexTypeConfig.getFieldsToUnnest());
       }
     }
   }

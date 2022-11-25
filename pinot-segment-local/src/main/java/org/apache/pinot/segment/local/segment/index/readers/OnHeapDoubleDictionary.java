@@ -19,6 +19,7 @@
 package org.apache.pinot.segment.local.segment.index.readers;
 
 import it.unimi.dsi.fastutil.doubles.Double2IntOpenHashMap;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
@@ -34,7 +35,7 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
  * </ul>
  * <p>This helps avoid creation of double from byte[].
  */
-public class OnHeapDoubleDictionary extends OnHeapDictionary {
+public class OnHeapDoubleDictionary extends BaseImmutableDictionary {
   private final Double2IntOpenHashMap _valToDictId;
   private final double[] _dictIdToVal;
 
@@ -60,13 +61,6 @@ public class OnHeapDoubleDictionary extends OnHeapDictionary {
   }
 
   @Override
-  public int insertionIndexOf(String stringValue) {
-    double doubleValue = Double.parseDouble(stringValue);
-    int index = _valToDictId.get(doubleValue);
-    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, doubleValue);
-  }
-
-  @Override
   public DataType getValueType() {
     return DataType.DOUBLE;
   }
@@ -74,6 +68,18 @@ public class OnHeapDoubleDictionary extends OnHeapDictionary {
   @Override
   public int indexOf(String stringValue) {
     return _valToDictId.get(Double.parseDouble(stringValue));
+  }
+
+  @Override
+  public int indexOf(double doubleValue) {
+    return _valToDictId.get(doubleValue);
+  }
+
+  @Override
+  public int insertionIndexOf(String stringValue) {
+    double doubleValue = Double.parseDouble(stringValue);
+    int index = _valToDictId.get(doubleValue);
+    return (index != Dictionary.NULL_VALUE_INDEX) ? index : Arrays.binarySearch(_dictIdToVal, doubleValue);
   }
 
   @Override
@@ -99,6 +105,11 @@ public class OnHeapDoubleDictionary extends OnHeapDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return _dictIdToVal[dictId];
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(_dictIdToVal[dictId]);
   }
 
   @Override

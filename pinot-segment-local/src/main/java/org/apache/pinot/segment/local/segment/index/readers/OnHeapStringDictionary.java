@@ -19,11 +19,13 @@
 package org.apache.pinot.segment.local.segment.index.readers;
 
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
-import org.apache.pinot.spi.utils.BytesUtils;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 
 /**
@@ -35,9 +37,11 @@ import org.apache.pinot.spi.utils.BytesUtils;
  * </ul>
  * <p>This helps avoid creation of String from byte[], which is expensive as well as creates garbage.
  */
-public class OnHeapStringDictionary extends OnHeapDictionary {
+public class OnHeapStringDictionary extends BaseImmutableDictionary {
   private final byte _paddingByte;
   private final String[] _unpaddedStrings;
+  private final byte[][] _unpaddedBytes;
+
   private final Object2IntOpenHashMap<String> _unPaddedStringToIdMap;
   private final String[] _paddedStrings;
 
@@ -46,14 +50,16 @@ public class OnHeapStringDictionary extends OnHeapDictionary {
 
     _paddingByte = paddingByte;
     byte[] buffer = new byte[numBytesPerValue];
+
+    _unpaddedBytes = new byte[length][];
     _unpaddedStrings = new String[length];
     _unPaddedStringToIdMap = new Object2IntOpenHashMap<>(length);
     _unPaddedStringToIdMap.defaultReturnValue(Dictionary.NULL_VALUE_INDEX);
 
     for (int i = 0; i < length; i++) {
-      String unpaddedString = getUnpaddedString(i, buffer);
-      _unpaddedStrings[i] = unpaddedString;
-      _unPaddedStringToIdMap.put(unpaddedString, i);
+      _unpaddedBytes[i] = getUnpaddedBytes(i, buffer);
+      _unpaddedStrings[i] = new String(_unpaddedBytes[i], UTF_8);
+      _unPaddedStringToIdMap.put(_unpaddedStrings[i], i);
     }
 
     if (paddingByte == 0) {
@@ -64,6 +70,16 @@ public class OnHeapStringDictionary extends OnHeapDictionary {
         _paddedStrings[i] = getPaddedString(i, buffer);
       }
     }
+  }
+
+  @Override
+  public DataType getValueType() {
+    return DataType.STRING;
+  }
+
+  @Override
+  public int indexOf(String stringValue) {
+    return _unPaddedStringToIdMap.getInt(stringValue);
   }
 
   /**
@@ -82,16 +98,6 @@ public class OnHeapStringDictionary extends OnHeapDictionary {
       return _paddingByte == 0 ? Arrays.binarySearch(_unpaddedStrings, stringValue)
           : Arrays.binarySearch(_paddedStrings, padString(stringValue));
     }
-  }
-
-  @Override
-  public DataType getValueType() {
-    return DataType.STRING;
-  }
-
-  @Override
-  public int indexOf(String stringValue) {
-    return _unPaddedStringToIdMap.getInt(stringValue);
   }
 
   @Override
@@ -120,12 +126,17 @@ public class OnHeapStringDictionary extends OnHeapDictionary {
   }
 
   @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return new BigDecimal(_unpaddedStrings[dictId]);
+  }
+
+  @Override
   public String getStringValue(int dictId) {
     return _unpaddedStrings[dictId];
   }
 
   @Override
   public byte[] getBytesValue(int dictId) {
-    return BytesUtils.toBytes(_unpaddedStrings[dictId]);
+    return _unpaddedBytes[dictId];
   }
 }

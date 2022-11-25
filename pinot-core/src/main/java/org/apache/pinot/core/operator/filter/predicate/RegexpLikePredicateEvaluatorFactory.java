@@ -21,8 +21,7 @@ package org.apache.pinot.core.operator.filter.predicate;
 import com.google.common.base.Preconditions;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
-import java.util.regex.Pattern;
-import org.apache.pinot.common.request.context.predicate.Predicate;
+import java.util.regex.Matcher;
 import org.apache.pinot.common.request.context.predicate.RegexpLikePredicate;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
@@ -62,26 +61,35 @@ public class RegexpLikePredicateEvaluatorFactory {
     return new RawValueBasedRegexpLikePredicateEvaluator(regexpLikePredicate);
   }
 
-  private static final int PATTERN_FLAG = Pattern.UNICODE_CASE | Pattern.CASE_INSENSITIVE;
-
   private static final class DictionaryBasedRegexpLikePredicateEvaluator extends BaseDictionaryBasedPredicateEvaluator {
-    final Pattern _pattern;
+    // Reuse matcher to avoid excessive allocation. This is safe to do because the evaluator is always used
+    // within the scope of a single thread.
+    final Matcher _matcher;
     final Dictionary _dictionary;
     int[] _matchingDictIds;
 
     public DictionaryBasedRegexpLikePredicateEvaluator(RegexpLikePredicate regexpLikePredicate, Dictionary dictionary) {
-      _pattern = Pattern.compile(regexpLikePredicate.getValue(), PATTERN_FLAG);
+      super(regexpLikePredicate);
       _dictionary = dictionary;
-    }
-
-    @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.REGEXP_LIKE;
+      _matcher = regexpLikePredicate.getPattern().matcher("");
     }
 
     @Override
     public boolean applySV(int dictId) {
-      return _pattern.matcher(_dictionary.getStringValue(dictId)).find();
+      return _matcher.reset(_dictionary.getStringValue(dictId)).find();
+    }
+
+    @Override
+    public int applySV(int limit, int[] docIds, int[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        int value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
     }
 
     @Override
@@ -101,15 +109,13 @@ public class RegexpLikePredicateEvaluatorFactory {
   }
 
   private static final class RawValueBasedRegexpLikePredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
-    final Pattern _pattern;
+    // Reuse matcher to avoid excessive allocation. This is safe to do because the evaluator is always used
+    // within the scope of a single thread.
+    final Matcher _matcher;
 
     public RawValueBasedRegexpLikePredicateEvaluator(RegexpLikePredicate regexpLikePredicate) {
-      _pattern = Pattern.compile(regexpLikePredicate.getValue(), PATTERN_FLAG);
-    }
-
-    @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.REGEXP_LIKE;
+      super(regexpLikePredicate);
+      _matcher = regexpLikePredicate.getPattern().matcher("");
     }
 
     @Override
@@ -119,7 +125,7 @@ public class RegexpLikePredicateEvaluatorFactory {
 
     @Override
     public boolean applySV(String value) {
-      return _pattern.matcher(value).find();
+      return _matcher.reset(value).find();
     }
   }
 }

@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import org.apache.pinot.query.service.QueryConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants.Helix;
 import org.apache.pinot.spi.utils.CommonConstants.Server;
@@ -44,7 +45,7 @@ public class ServerConf {
   private static final String PINOT_SERVER_QUERY_EXECUTOR_CLASS = "pinot.server.query.executor.class";
   private static final String PINOT_SERVER_TRANSFORM_FUNCTIONS = "pinot.server.transforms";
 
-  private static final String PINOT_QUERY_SCHEDULER_PREFIX = "pinot.query.scheduler";
+  public static final String PINOT_QUERY_SCHEDULER_PREFIX = "pinot.query.scheduler";
 
   private PinotConfiguration _serverConf;
 
@@ -92,12 +93,29 @@ public class ServerConf {
     return _serverConf.getProperty(Server.CONFIG_OF_ENABLE_GRPC_SERVER, Server.DEFAULT_ENABLE_GRPC_SERVER);
   }
 
+  public boolean isGrpcTlsServerEnabled() {
+    return _serverConf.getProperty(Server.CONFIG_OF_GRPCTLS_SERVER_ENABLED, Server.DEFAULT_GRPCTLS_SERVER_ENABLED);
+  }
+
+  public boolean isMultiStageServerEnabled() {
+    return _serverConf.getProperty(Helix.CONFIG_OF_MULTI_STAGE_ENGINE_ENABLED,
+        Helix.DEFAULT_MULTI_STAGE_ENGINE_ENABLED);
+  }
+
   public boolean isEnableSwagger() {
     return _serverConf.getProperty(CONFIG_OF_SWAGGER_SERVER_ENABLED, DEFAULT_SWAGGER_SERVER_ENABLED);
   }
 
   public int getGrpcPort() {
     return _serverConf.getProperty(Server.CONFIG_OF_GRPC_PORT, Server.DEFAULT_GRPC_PORT);
+  }
+
+  public int getMultiStageServicePort() {
+    return _serverConf.getProperty(QueryConfig.KEY_OF_QUERY_SERVER_PORT, QueryConfig.DEFAULT_QUERY_SERVER_PORT);
+  }
+
+  public int getMultiStageMailboxPort() {
+    return _serverConf.getProperty(QueryConfig.KEY_OF_QUERY_RUNNER_PORT, QueryConfig.DEFAULT_QUERY_RUNNER_PORT);
   }
 
   public PinotConfiguration getConfig(String component) {

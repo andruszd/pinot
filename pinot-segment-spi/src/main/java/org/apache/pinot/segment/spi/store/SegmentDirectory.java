@@ -19,10 +19,12 @@
 package org.apache.pinot.segment.spi.store;
 
 import java.io.Closeable;
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.Set;
+import javax.annotation.Nullable;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.pinot.segment.spi.FetchContext;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
@@ -141,6 +143,27 @@ public abstract class SegmentDirectory implements Closeable {
   }
 
   /**
+   * Copy segment directory to a local directory.
+   * @param dest the destination directory
+   */
+  public void copyTo(File dest)
+      throws Exception {
+  }
+
+  /**
+   * Get the storage tier where the segment directory is placed by server.
+   *
+   * @return storage tier, null by default.
+   */
+  @Nullable
+  public abstract String getTier();
+
+  /**
+   * Set the storage tier where the segment directory is placed by server.
+   */
+  public abstract void setTier(@Nullable String tier);
+
+  /**
    * Reader for columnar index buffers from segment directory
    */
   public abstract class Reader implements Closeable {
@@ -156,6 +179,10 @@ public abstract class SegmentDirectory implements Closeable {
         throws IOException;
 
     public abstract boolean hasIndexFor(String column, ColumnIndexType type);
+
+    public SegmentDirectory toSegmentDirectory() {
+      return SegmentDirectory.this;
+    }
 
     public abstract String toString();
   }
@@ -191,10 +218,6 @@ public abstract class SegmentDirectory implements Closeable {
 
     public abstract void save()
         throws IOException;
-
-    public SegmentDirectory toSegmentDirectory() {
-      return SegmentDirectory.this;
-    }
 
     public abstract String toString();
   }

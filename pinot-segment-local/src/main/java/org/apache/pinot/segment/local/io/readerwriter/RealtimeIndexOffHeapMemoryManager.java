@@ -28,6 +28,7 @@ import org.apache.pinot.common.utils.HLCSegmentName;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.common.utils.SegmentName;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 
 
 /**
@@ -50,8 +51,8 @@ public abstract class RealtimeIndexOffHeapMemoryManager implements PinotDataBuff
   protected RealtimeIndexOffHeapMemoryManager(ServerMetrics serverMetrics, String segmentName) {
     _serverMetrics = serverMetrics;
     _segmentName = segmentName;
-    if (SegmentName.isLowLevelConsumerSegmentName(segmentName)) {
-      LLCSegmentName llcSegmentName = new LLCSegmentName(segmentName);
+    LLCSegmentName llcSegmentName = LLCSegmentName.of(segmentName);
+    if (llcSegmentName != null) {
       _tableName = llcSegmentName.getTableName();
     } else if (SegmentName.isHighLevelConsumerSegmentName(segmentName)) {
       HLCSegmentName hlcSegmentName = new HLCSegmentName(segmentName);

@@ -22,6 +22,8 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URL;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.io.FileUtils;
@@ -29,15 +31,19 @@ import org.apache.pinot.plugin.inputformat.avro.AvroRecordReader;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.SegmentTestUtils;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
-import org.apache.pinot.segment.local.segment.readers.IntermediateSegmentRecordReader;
+import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
+import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
 import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.index.reader.InvertedIndexReader;
+import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
+import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.TimeGranularitySpec;
@@ -92,7 +98,6 @@ public class IntermediateSegmentTest {
     segmentGeneratorConfig.setTableName("testTable");
     segmentGeneratorConfig.setSegmentName(SEGMENT_NAME);
     segmentGeneratorConfig.setOutDir(INDEX_DIR.getAbsolutePath());
-    segmentGeneratorConfig.setSkipTimeValueCheck(true);
     segmentGeneratorConfig.setInvertedIndexCreationColumns(Arrays.asList("column6", "column7"));
 
     IndexSegment segmentFromIntermediateSegment = buildSegmentFromIntermediateSegment(segmentGeneratorConfig);
@@ -130,6 +135,21 @@ public class IntermediateSegmentTest {
           assertEquals(actualInvertedIndexReader.getDocIds(j), expectedInvertedIndexReader.getDocIds(j));
         }
       }
+
+      // Check for Partition Metadata.
+      SegmentPartitionConfig segmentPartitionConfig = tableConfig.getIndexingConfig().getSegmentPartitionConfig();
+      if (segmentPartitionConfig != null && segmentPartitionConfig.getColumnPartitionMap().containsKey(column)) {
+        ColumnMetadata columnMetadata =
+            segmentFromIntermediateSegment.getSegmentMetadata().getColumnMetadataFor(column);
+        assertNotNull(columnMetadata.getPartitionFunction());
+        assertEquals(columnMetadata.getPartitionFunction().getName(), segmentPartitionConfig.getFunctionName(column));
+        assertEquals(columnMetadata.getPartitionFunction().getNumPartitions(),
+            segmentPartitionConfig.getNumPartitions(column));
+        assertEquals(columnMetadata.getPartitionFunction().getFunctionConfig(),
+            segmentPartitionConfig.getFunctionConfig(column));
+        assertNotNull(columnMetadata.getPartitions());
+        assertEquals(columnMetadata.getPartitions().size(), 1);
+      }
     }
   }
 
@@ -142,15 +162,16 @@ public class IntermediateSegmentTest {
 
     // Ingest data.
     ingestDataToIntermediateSegment(segmentGeneratorConfig, intermediateSegment);
-    IntermediateSegmentRecordReader intermediateSegmentRecordReader =
-        new IntermediateSegmentRecordReader(intermediateSegment);
+    PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader();
+    recordReader.init(intermediateSegment);
 
     // Build the segment from intermediate segment.
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
-    driver.init(segmentGeneratorConfig, intermediateSegmentRecordReader);
+    driver.init(segmentGeneratorConfig, recordReader);
     driver.build();
 
     // Destroy intermediate segment after the segment creation.
+    recordReader.close();
     intermediateSegment.destroy();
 
     return ImmutableSegmentLoader.load(new File(INDEX_DIR, segmentName), ReadMode.heap);
@@ -209,12 +230,31 @@ public class IntermediateSegmentTest {
   private static TableConfig createTableConfig(String inputFile) {
     TableConfig tableConfig;
     if (AVRO_DATA_SV.equals(inputFile)) {
+      // The segment generation code in SegmentColumnarIndexCreator will throw
+      // exception if start and end time in time column are not in acceptable
+      // range. For this test, we first need to fix the input avro data
+      // to have the time column values in allowed range. Until then, the check
+      // is explicitly disabled
+      IngestionConfig ingestionConfig = new IngestionConfig();
+      ingestionConfig.setSegmentTimeValueCheck(false);
+      ingestionConfig.setRowTimeValueCheck(false);
       tableConfig =
           new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setTimeColumnName("daysSinceEpoch")
-              .setInvertedIndexColumns(Arrays.asList("column6", "column7", "column11", "column17", "column18")).build();
+              .setInvertedIndexColumns(Arrays.asList("column6", "column7", "column11", "column17", "column18"))
+              .setSegmentPartitionConfig(getSegmentPartitionConfig())
+              .setIngestionConfig(ingestionConfig).build();
     } else {
       tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").build();
     }
     return tableConfig;
+  }
+
+  private static SegmentPartitionConfig getSegmentPartitionConfig() {
+    Map<String, ColumnPartitionConfig> columnPartitionConfigMap = new HashMap<>();
+    ColumnPartitionConfig columnOneConfig = new ColumnPartitionConfig("Murmur", 1);
+    columnPartitionConfigMap.put("column7", columnOneConfig);
+    ColumnPartitionConfig columnTwoConfig = new ColumnPartitionConfig("HashCode", 1);
+    columnPartitionConfigMap.put("column11", columnTwoConfig);
+    return new SegmentPartitionConfig(columnPartitionConfigMap);
   }
 }

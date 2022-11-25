@@ -25,10 +25,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
+import org.apache.pinot.broker.routing.adaptiveserverselector.AdaptiveServerSelector;
+import org.apache.pinot.broker.routing.segmentpreselector.SegmentPreSelector;
 import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
@@ -52,6 +55,7 @@ abstract class BaseInstanceSelector implements InstanceSelector {
   private final AtomicLong _requestId = new AtomicLong();
   private final String _tableNameWithType;
   private final BrokerMetrics _brokerMetrics;
+  protected final AdaptiveServerSelector _adaptiveServerSelector;
 
   // These 4 variables are the cached states to help accelerate the change processing
   private Set<String> _enabledInstances;
@@ -63,16 +67,22 @@ abstract class BaseInstanceSelector implements InstanceSelector {
   private volatile Map<String, List<String>> _segmentToEnabledInstancesMap;
   private volatile Set<String> _unavailableSegments;
 
-  BaseInstanceSelector(String tableNameWithType, BrokerMetrics brokerMetrics) {
+  BaseInstanceSelector(String tableNameWithType, BrokerMetrics brokerMetrics,
+      @Nullable AdaptiveServerSelector adaptiveServerSelector) {
     _tableNameWithType = tableNameWithType;
     _brokerMetrics = brokerMetrics;
+    _adaptiveServerSelector = adaptiveServerSelector;
   }
 
   @Override
-  public void init(Set<String> enabledInstances, ExternalView externalView, IdealState idealState,
+  public void init(Set<String> enabledInstances, IdealState idealState, ExternalView externalView,
       Set<String> onlineSegments) {
     _enabledInstances = enabledInstances;
-    onExternalViewChange(externalView, idealState, onlineSegments);
+    int segmentMapCapacity = HashUtil.getHashMapCapacity(onlineSegments.size());
+    _segmentToOnlineInstancesMap = new HashMap<>(segmentMapCapacity);
+    _segmentToOfflineInstancesMap = new HashMap<>(segmentMapCapacity);
+    _instanceToSegmentsMap = new HashMap<>();
+    onAssignmentChange(idealState, externalView, onlineSegments);
   }
 
   /**
@@ -132,24 +142,19 @@ abstract class BaseInstanceSelector implements InstanceSelector {
    * {@code unavailableSegments} based on the cached states.
    */
   @Override
-  public void onExternalViewChange(ExternalView externalView, IdealState idealState, Set<String> onlineSegments) {
-    int numSegments = onlineSegments.size();
-    int segmentMapCapacity = HashUtil.getHashMapCapacity(numSegments);
-    _segmentToOnlineInstancesMap = new HashMap<>(segmentMapCapacity);
-    _segmentToOfflineInstancesMap = new HashMap<>(segmentMapCapacity);
-    if (_instanceToSegmentsMap != null) {
-      _instanceToSegmentsMap = new HashMap<>(HashUtil.getHashMapCapacity(_instanceToSegmentsMap.size()));
-    } else {
-      _instanceToSegmentsMap = new HashMap<>();
-    }
+  public void onAssignmentChange(IdealState idealState, ExternalView externalView, Set<String> onlineSegments) {
+    _segmentToOnlineInstancesMap.clear();
+    _segmentToOfflineInstancesMap.clear();
+    _instanceToSegmentsMap.clear();
 
     // Update the cached maps
-    updateSegmentMaps(externalView, idealState, onlineSegments, _segmentToOnlineInstancesMap,
+    updateSegmentMaps(idealState, externalView, onlineSegments, _segmentToOnlineInstancesMap,
         _segmentToOfflineInstancesMap, _instanceToSegmentsMap);
 
     // Generate a new map from segment to enabled ONLINE/CONSUMING instances and a new set of unavailable segments (no
     // enabled instance or all enabled instances are in ERROR state)
-    Map<String, List<String>> segmentToEnabledInstancesMap = new HashMap<>(segmentMapCapacity);
+    Map<String, List<String>> segmentToEnabledInstancesMap =
+        new HashMap<>(HashUtil.getHashMapCapacity(_segmentToOnlineInstancesMap.size()));
     Set<String> unavailableSegments = new HashSet<>();
     // NOTE: Put null as the value when there is no enabled instances for a segment so that segmentToEnabledInstancesMap
     // always contains all segments. With this, in onInstancesChange() we can directly iterate over
@@ -166,40 +171,59 @@ abstract class BaseInstanceSelector implements InstanceSelector {
   }
 
   /**
-   * Updates the segment maps based on the given external view, ideal state and online segments (segments with
-   * ONLINE/CONSUMING instances in the ideal state and selected by the pre-selector).
+   * Updates the segment maps based on the given ideal state, external view and online segments (segments with
+   * ONLINE/CONSUMING instances in the ideal state and pre-selected by the {@link SegmentPreSelector}).
    */
-  void updateSegmentMaps(ExternalView externalView, IdealState idealState, Set<String> onlineSegments,
+  void updateSegmentMaps(IdealState idealState, ExternalView externalView, Set<String> onlineSegments,
       Map<String, List<String>> segmentToOnlineInstancesMap, Map<String, List<String>> segmentToOfflineInstancesMap,
       Map<String, List<String>> instanceToSegmentsMap) {
     // Iterate over the external view instead of the online segments so that the map lookups are performed on the
     // HashSet instead of the TreeSet for performance
+    // NOTE: Do not track segments not in the external view because it is a valid state when the segment is new added
+    Map<String, Map<String, String>> idealStateAssignment = idealState.getRecord().getMapFields();
     for (Map.Entry<String, Map<String, String>> entry : externalView.getRecord().getMapFields().entrySet()) {
       String segment = entry.getKey();
+
+      // Only track online segments
       if (!onlineSegments.contains(segment)) {
         continue;
       }
-      Map<String, String> instanceStateMap = entry.getValue();
-      List<String> onlineInstances = new ArrayList<>(instanceStateMap.size());
+
+      Map<String, String> externalViewInstanceStateMap = entry.getValue();
+      Map<String, String> idealStateInstanceStateMap = idealStateAssignment.get(segment);
+      List<String> onlineInstances = new ArrayList<>(externalViewInstanceStateMap.size());
       List<String> offlineInstances = new ArrayList<>();
       segmentToOnlineInstancesMap.put(segment, onlineInstances);
       segmentToOfflineInstancesMap.put(segment, offlineInstances);
-      for (Map.Entry<String, String> instanceStateEntry : instanceStateMap.entrySet()) {
+      for (Map.Entry<String, String> instanceStateEntry : externalViewInstanceStateMap.entrySet()) {
         String instance = instanceStateEntry.getKey();
-        String state = instanceStateEntry.getValue();
+
+        // Only track instances within the ideal state
+        // NOTE: When an instance is not in the ideal state, the instance will drop the segment soon, and it is not safe
+        // to query this instance for the segment. This could happen when a segment is moved from one instance to
+        // another instance.
+        if (!idealStateInstanceStateMap.containsKey(instance)) {
+          continue;
+        }
+
+        String externalViewState = instanceStateEntry.getValue();
         // Do not track instances in ERROR state
-        if (!state.equals(SegmentStateModel.ERROR)) {
+        if (!externalViewState.equals(SegmentStateModel.ERROR)) {
           instanceToSegmentsMap.computeIfAbsent(instance, k -> new ArrayList<>()).add(segment);
-          if (state.equals(SegmentStateModel.OFFLINE)) {
+          if (externalViewState.equals(SegmentStateModel.OFFLINE)) {
             offlineInstances.add(instance);
           } else {
             onlineInstances.add(instance);
           }
         }
       }
+
       // Sort the online instances for replica-group routing to work. For multiple segments with the same online
       // instances, if the list is sorted, the same index in the list will always point to the same instance.
-      onlineInstances.sort(null);
+      if (!(externalViewInstanceStateMap instanceof SortedMap)) {
+        onlineInstances.sort(null);
+        offlineInstances.sort(null);
+      }
     }
   }
 
@@ -245,7 +269,12 @@ abstract class BaseInstanceSelector implements InstanceSelector {
   @Override
   public SelectionResult select(BrokerRequest brokerRequest, List<String> segments) {
     int requestId = (int) (_requestId.getAndIncrement() % MAX_REQUEST_ID);
-    Map<String, String> segmentToInstanceMap = select(segments, requestId, _segmentToEnabledInstancesMap);
+    Map<String, String> queryOptions = (brokerRequest.getPinotQuery() != null
+        && brokerRequest.getPinotQuery().getQueryOptions() != null)
+        ? brokerRequest.getPinotQuery().getQueryOptions()
+        : Collections.emptyMap();
+    Map<String, String> segmentToInstanceMap = select(segments, requestId, _segmentToEnabledInstancesMap,
+        queryOptions);
     Set<String> unavailableSegments = _unavailableSegments;
     if (unavailableSegments.isEmpty()) {
       return new SelectionResult(segmentToInstanceMap, Collections.emptyList());
@@ -267,5 +296,5 @@ abstract class BaseInstanceSelector implements InstanceSelector {
    * ONLINE/CONSUMING instances). If enabled instances are not {@code null}, they are sorted in alphabetical order.
    */
   abstract Map<String, String> select(List<String> segments, int requestId,
-      Map<String, List<String>> segmentToEnabledInstancesMap);
+      Map<String, List<String>> segmentToEnabledInstancesMap, Map<String, String> queryOptions);
 }

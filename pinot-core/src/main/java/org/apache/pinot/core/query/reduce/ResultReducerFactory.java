@@ -21,6 +21,7 @@ package org.apache.pinot.core.query.reduce;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.DistinctAggregationFunction;
 import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextUtils;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 
 
@@ -36,6 +37,10 @@ public final class ResultReducerFactory {
    * Constructs the right result reducer based on the given query context.
    */
   public static DataTableReducer getResultReducer(QueryContext queryContext) {
+    if (queryContext.isExplain()) {
+      return new ExplainPlanDataTableReducer(queryContext);
+    }
+
     AggregationFunction[] aggregationFunctions = queryContext.getAggregationFunctions();
     if (aggregationFunctions == null) {
       // Selection query
@@ -46,7 +51,7 @@ public final class ResultReducerFactory {
         // Aggregation only query
         if (aggregationFunctions.length == 1 && aggregationFunctions[0].getType() == AggregationFunctionType.DISTINCT) {
           // Distinct query
-          return new DistinctDataTableReducer(queryContext, (DistinctAggregationFunction) aggregationFunctions[0]);
+          return new DistinctDataTableReducer((DistinctAggregationFunction) aggregationFunctions[0], queryContext);
         } else {
           return new AggregationDataTableReducer(queryContext);
         }
@@ -54,6 +59,15 @@ public final class ResultReducerFactory {
         // Aggregation group-by query
         return new GroupByDataTableReducer(queryContext);
       }
+    }
+  }
+
+  public static StreamingReducer getStreamingReducer(QueryContext queryContext) {
+    if (!QueryContextUtils.isSelectionQuery(queryContext) || queryContext.getOrderByExpressions() != null) {
+      throw new UnsupportedOperationException("Only selection queries are supported");
+    } else {
+      // Selection query
+      return new SelectionOnlyStreamingReducer(queryContext);
     }
   }
 }

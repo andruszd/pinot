@@ -18,15 +18,12 @@
  */
 package org.apache.pinot.core.operator.transform.function;
 
-import com.google.common.base.Preconditions;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import org.apache.pinot.core.operator.blocks.ProjectionBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
-import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.spi.utils.ArrayCopyUtils;
 
 
 /**
@@ -35,20 +32,22 @@ import org.apache.pinot.spi.utils.ArrayCopyUtils;
  */
 public abstract class LogicalOperatorTransformFunction extends BaseTransformFunction {
   protected List<TransformFunction> _arguments;
-  protected int[] _results;
 
   @Override
   public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
     _arguments = arguments;
     int numArguments = arguments.size();
-    Preconditions.checkState(numArguments > 1, String
-        .format("Expect more than 1 argument for logical operator [%s], args [%s].", getName(),
-            Arrays.toString(arguments.toArray())));
+    if (numArguments <= 1) {
+      throw new IllegalArgumentException(
+          "Expect more than 1 argument for logical operator [" + getName() + "], args [" + Arrays.toString(
+              arguments.toArray()) + "].");
+    }
     for (int i = 0; i < numArguments; i++) {
       TransformResultMetadata argumentMetadata = arguments.get(i).getResultMetadata();
-      Preconditions
-          .checkState(argumentMetadata.isSingleValue() && argumentMetadata.getDataType().getStoredType().isNumeric(),
-              String.format("Unsupported argument of index: %d, expecting single-valued boolean/number", i));
+      if (!(argumentMetadata.isSingleValue() && argumentMetadata.getDataType().getStoredType().isNumeric())) {
+        throw new IllegalArgumentException(
+            "Unsupported argument of index: " + i + ", expecting single-valued boolean/number");
+      }
     }
   }
 
@@ -59,20 +58,20 @@ public abstract class LogicalOperatorTransformFunction extends BaseTransformFunc
 
   @Override
   public int[] transformToIntValuesSV(ProjectionBlock projectionBlock) {
-    if (_results == null) {
-      _results = new int[DocIdSetPlanNode.MAX_DOC_PER_CALL];
-    }
     int numDocs = projectionBlock.getNumDocs();
-    ArrayCopyUtils.copy(_arguments.get(0).transformToIntValuesSV(projectionBlock), _results, numDocs);
+    if (_intValuesSV == null) {
+      _intValuesSV = new int[numDocs];
+    }
+    System.arraycopy(_arguments.get(0).transformToIntValuesSV(projectionBlock), 0, _intValuesSV, 0, numDocs);
     int numArguments = _arguments.size();
     for (int i = 1; i < numArguments; i++) {
       TransformFunction transformFunction = _arguments.get(i);
       int[] results = transformFunction.transformToIntValuesSV(projectionBlock);
       for (int j = 0; j < numDocs; j++) {
-        _results[j] = getLogicalFuncResult(_results[j], results[j]);
+        _intValuesSV[j] = getLogicalFuncResult(_intValuesSV[j], results[j]);
       }
     }
-    return _results;
+    return _intValuesSV;
   }
 
   abstract int getLogicalFuncResult(int left, int right);

@@ -18,26 +18,37 @@
  */
 package org.apache.pinot.common.function;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+
 public enum TransformFunctionType {
-  // Aggregation functions for single-valued columns
-  ADD("add"),
-  SUB("sub"),
-  MULT("mult"),
-  DIV("div"),
+  // arithmetic functions for single-valued columns
+  ADD("add", "plus"),
+  SUB("sub", "minus"),
+  MULT("mult", "times"),
+  DIV("div", "divide"),
   MOD("mod"),
 
-  PLUS("plus"),
-  MINUS("minus"),
-  TIMES("times"),
-  DIVIDE("divide"),
-
   ABS("abs"),
-  CEIL("ceil"),
+  CEIL("ceil", "ceiling"),
   EXP("exp"),
   FLOOR("floor"),
-  LN("ln"),
+  LOG("log", "ln"),
+  LOG2("log2"),
+  LOG10("log10"),
+  SIGN("sign"),
+  ROUND_DECIMAL("roundDecimal"),
+  TRUNCATE("truncate"),
+  POWER("power", "pow"),
   SQRT("sqrt"),
 
+  LEAST("least"),
+  GREATEST("greatest"),
+
+  // predicate functions
   EQUALS("equals"),
   NOT_EQUALS("not_equals"),
   GREATER_THAN("greater_than"),
@@ -45,24 +56,60 @@ public enum TransformFunctionType {
   LESS_THAN("less_than"),
   LESS_THAN_OR_EQUAL("less_than_or_equal"),
   IN("in"),
+  NOT_IN("not_in"),
+
+  IS_NULL("is_null"),
+  IS_NOT_NULL("is_not_null"),
+  COALESCE("coalesce"),
+
+  IS_DISTINCT_FROM("is_distinct_from"),
+  IS_NOT_DISTINCT_FROM("is_not_distinct_from"),
 
   AND("and"),
   OR("or"),
+  NOT("not"),   // NOT operator doesn't cover the transform for NOT IN and NOT LIKE
 
-  CAST("cast"),
+  // CASE WHEN function parsed as 'CASE_WHEN'
   CASE("case"),
+
+  // date type conversion functions
+  CAST("cast"),
+
+  // string functions
   JSONEXTRACTSCALAR("jsonExtractScalar"),
   JSONEXTRACTKEY("jsonExtractKey"),
+
+  // date time functions
   TIMECONVERT("timeConvert"),
   DATETIMECONVERT("dateTimeConvert"),
   DATETRUNC("dateTrunc"),
-  ARRAYLENGTH("arrayLength"),
+  YEAR("year"),
+  YEAR_OF_WEEK("yearOfWeek", "yow"),
+  QUARTER("quarter"),
+  MONTH_OF_YEAR("monthOfYear", "month"),
+  WEEK_OF_YEAR("weekOfYear", "week"),
+  DAY_OF_YEAR("dayOfYear", "doy"),
+  DAY_OF_MONTH("dayOfMonth", "day"),
+  DAY_OF_WEEK("dayOfWeek", "dow"),
+  HOUR("hour"),
+  MINUTE("minute"),
+  SECOND("second"),
+  MILLISECOND("millisecond"),
+
+  EXTRACT("extract"),
+
+  // array functions
+  // The only column accepted by "cardinality" function is multi-value array, thus putting "cardinality" as alias.
+  // TODO: once we support other types of multiset, we should make CARDINALITY its own function
+  ARRAYLENGTH("arrayLength", "cardinality"),
   ARRAYAVERAGE("arrayAverage"),
   ARRAYMIN("arrayMin"),
   ARRAYMAX("arrayMax"),
   ARRAYSUM("arraySum"),
   VALUEIN("valueIn"),
   MAPVALUE("mapValue"),
+
+  // special functions
   INIDSET("inIdSet"),
   LOOKUP("lookUp"),
   GROOVY("groovy"),
@@ -93,36 +140,43 @@ public enum TransformFunctionType {
   // Geo relationship
   ST_CONTAINS("ST_Contains"),
   ST_EQUALS("ST_Equals"),
+  ST_WITHIN("ST_Within"),
 
   // Geo indexing
-  GEOTOH3("geoToH3");
+  GEOTOH3("geoToH3"),
+
+  // Trigonometry
+  SIN("sin"),
+  COS("cos"),
+  TAN("tan"),
+  COT("cot"),
+  ASIN("asin"),
+  ACOS("acos"),
+  ATAN("atan"),
+  ATAN2("atan2"),
+  SINH("sinh"),
+  COSH("cosh"),
+  TANH("tanh"),
+  DEGREES("degrees"),
+  RADIANS("radians");
 
   private final String _name;
+  private final List<String> _aliases;
 
-  TransformFunctionType(String name) {
+  TransformFunctionType(String name, String... aliases) {
     _name = name;
-  }
-
-  /**
-   * Returns the corresponding transform function type for the given function name.
-   */
-  public static TransformFunctionType getTransformFunctionType(String functionName) {
-    String upperCaseFunctionName = functionName.toUpperCase();
-    try {
-      return TransformFunctionType.valueOf(upperCaseFunctionName);
-    } catch (IllegalArgumentException e) {
-      if (FunctionRegistry.containsFunction(functionName)) {
-        return SCALAR;
-      }
-      // Support function name of both jsonExtractScalar and json_extract_scalar
-      if (upperCaseFunctionName.contains("_")) {
-        return getTransformFunctionType(upperCaseFunctionName.replace("_", ""));
-      }
-      throw new IllegalArgumentException("Invalid transform function name: " + functionName);
-    }
+    List<String> all = new ArrayList<>(aliases.length + 2);
+    all.add(name);
+    all.add(name());
+    all.addAll(Arrays.asList(aliases));
+    _aliases = Collections.unmodifiableList(all);
   }
 
   public String getName() {
     return _name;
+  }
+
+  public List<String> getAliases() {
+    return _aliases;
   }
 }

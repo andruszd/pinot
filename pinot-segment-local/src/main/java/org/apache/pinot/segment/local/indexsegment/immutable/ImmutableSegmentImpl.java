@@ -19,28 +19,41 @@
 package org.apache.pinot.segment.local.indexsegment.immutable;
 
 import com.google.common.base.Preconditions;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.commons.io.FileUtils;
+import org.apache.pinot.common.utils.HashUtil;
+import org.apache.pinot.segment.local.dedup.PartitionDedupMetadataManager;
 import org.apache.pinot.segment.local.segment.index.datasource.ImmutableDataSource;
+import org.apache.pinot.segment.local.segment.readers.PinotSegmentColumnReader;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
 import org.apache.pinot.segment.local.startree.v2.store.StarTreeIndexContainer;
 import org.apache.pinot.segment.local.upsert.PartitionUpsertMetadataManager;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.FetchContext;
 import org.apache.pinot.segment.spi.ImmutableSegment;
+import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.index.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.column.ColumnIndexContainer;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
 import org.apache.pinot.segment.spi.index.reader.InvertedIndexReader;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2;
 import org.apache.pinot.segment.spi.store.SegmentDirectory;
+import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
+import org.roaringbitmap.buffer.MutableRoaringBitmap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,11 +65,14 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
   private final SegmentMetadataImpl _segmentMetadata;
   private final Map<String, ColumnIndexContainer> _indexContainerMap;
   private final StarTreeIndexContainer _starTreeIndexContainer;
+  private final Map<String, DataSource> _dataSources;
+
+  // Dedupe
+  private PartitionDedupMetadataManager _partitionDedupMetadataManager;
 
   // For upsert
   private PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
   private ThreadSafeMutableRoaringBitmap _validDocIds;
-  private PinotSegmentRecordReader _pinotSegmentRecordReader;
 
   public ImmutableSegmentImpl(SegmentDirectory segmentDirectory, SegmentMetadataImpl segmentMetadata,
       Map<String, ColumnIndexContainer> columnIndexContainerMap,
@@ -65,6 +81,16 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
     _segmentMetadata = segmentMetadata;
     _indexContainerMap = columnIndexContainerMap;
     _starTreeIndexContainer = starTreeIndexContainer;
+    _dataSources = new HashMap<>(HashUtil.getHashMapCapacity(segmentMetadata.getColumnMetadataMap().size()));
+
+    for (Map.Entry<String, ColumnMetadata> entry : segmentMetadata.getColumnMetadataMap().entrySet()) {
+      String colName = entry.getKey();
+      _dataSources.put(colName, new ImmutableDataSource(entry.getValue(), _indexContainerMap.get(colName)));
+    }
+  }
+
+  public void enableDedup(PartitionDedupMetadataManager partitionDedupMetadataManager) {
+    _partitionDedupMetadataManager = partitionDedupMetadataManager;
   }
 
   /**
@@ -74,6 +100,59 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
       ThreadSafeMutableRoaringBitmap validDocIds) {
     _partitionUpsertMetadataManager = partitionUpsertMetadataManager;
     _validDocIds = validDocIds;
+  }
+
+  @Nullable
+  public MutableRoaringBitmap loadValidDocIdsFromSnapshot() {
+    File validDocIdsSnapshotFile = getValidDocIdsSnapshotFile();
+    if (validDocIdsSnapshotFile.exists()) {
+      try {
+        byte[] bytes = FileUtils.readFileToByteArray(validDocIdsSnapshotFile);
+        MutableRoaringBitmap validDocIds = new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).toMutableRoaringBitmap();
+        LOGGER.info("Loaded valid doc ids for segment: {} with: {} valid docs", getSegmentName(),
+            validDocIds.getCardinality());
+        return validDocIds;
+      } catch (Exception e) {
+        LOGGER.warn("Caught exception while loading valid doc ids from snapshot file: {}, ignoring the snapshot",
+            validDocIdsSnapshotFile);
+      }
+    }
+    return null;
+  }
+
+  public void persistValidDocIdsSnapshot(MutableRoaringBitmap validDocIds) {
+    File validDocIdsSnapshotFile = getValidDocIdsSnapshotFile();
+    try {
+      if (validDocIdsSnapshotFile.exists()) {
+        FileUtils.delete(validDocIdsSnapshotFile);
+      }
+      try (DataOutputStream dataOutputStream = new DataOutputStream(new FileOutputStream(validDocIdsSnapshotFile))) {
+        validDocIds.serialize(dataOutputStream);
+      }
+      LOGGER.info("Persisted valid doc ids for segment: {} with: {} valid docs", getSegmentName(),
+          validDocIds.getCardinality());
+    } catch (Exception e) {
+      LOGGER.warn("Caught exception while persisting valid doc ids to snapshot file: {}, skipping",
+          validDocIdsSnapshotFile);
+    }
+  }
+
+  public void deleteValidDocIdsSnapshot() {
+    File validDocIdsSnapshotFile = getValidDocIdsSnapshotFile();
+    if (validDocIdsSnapshotFile.exists()) {
+      try {
+        FileUtils.delete(validDocIdsSnapshotFile);
+        LOGGER.info("Deleted valid doc ids snapshot for segment: {}", getSegmentName());
+      } catch (Exception e) {
+        LOGGER.warn("Caught exception while deleting valid doc ids snapshot file: {}, skipping",
+            validDocIdsSnapshotFile);
+      }
+    }
+  }
+
+  private File getValidDocIdsSnapshotFile() {
+    return new File(SegmentDirectoryPaths.findSegmentDirectory(_segmentMetadata.getIndexDir()),
+        V1Constants.VALID_DOC_IDS_SNAPSHOT_FILE_NAME);
   }
 
   @Override
@@ -100,6 +179,12 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
     return _segmentDirectory.getDiskSizeBytes();
   }
 
+  @Nullable
+  @Override
+  public String getTier() {
+    return _segmentDirectory.getTier();
+  }
+
   @Override
   public String getSegmentName() {
     return _segmentMetadata.getName();
@@ -112,10 +197,10 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
 
   @Override
   public DataSource getDataSource(String column) {
-    ColumnMetadata columnMetadata = _segmentMetadata.getColumnMetadataFor(column);
-    Preconditions.checkNotNull(columnMetadata,
-        "ColumnMetadata for " + column + " should not be null. " + "Potentially invalid column name specified.");
-    return new ImmutableDataSource(columnMetadata, _indexContainerMap.get(column));
+    DataSource result = _dataSources.get(column);
+    Preconditions.checkNotNull(result,
+        "DataSource for %s should not be null. Potentially invalid column name specified.", column);
+    return result;
   }
 
   @Override
@@ -148,10 +233,15 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
     String segmentName = getSegmentName();
     LOGGER.info("Trying to destroy segment : {}", segmentName);
 
-    // Remove the upsert metadata before closing the readers
+    // Remove the upsert and dedup metadata before closing the readers
     if (_partitionUpsertMetadataManager != null) {
       _partitionUpsertMetadataManager.removeSegment(this);
     }
+
+    if (_partitionDedupMetadataManager != null) {
+      _partitionDedupMetadataManager.removeSegment(this);
+    }
+
     for (Map.Entry<String, ColumnIndexContainer> entry : _indexContainerMap.entrySet()) {
       try {
         entry.getValue().close();
@@ -171,13 +261,6 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
         LOGGER.error("Failed to close star-tree. Continuing with error.", e);
       }
     }
-    if (_pinotSegmentRecordReader != null) {
-      try {
-        _pinotSegmentRecordReader.close();
-      } catch (IOException e) {
-        LOGGER.error("Failed to close record reader. Continuing with error.", e);
-      }
-    }
   }
 
   @Override
@@ -193,15 +276,22 @@ public class ImmutableSegmentImpl implements ImmutableSegment {
 
   @Override
   public GenericRow getRecord(int docId, GenericRow reuse) {
-    try {
-      if (_pinotSegmentRecordReader == null) {
-        _pinotSegmentRecordReader = new PinotSegmentRecordReader();
-        _pinotSegmentRecordReader.init(this);
-      }
-      _pinotSegmentRecordReader.getRecord(reuse, docId);
+    try (PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader()) {
+      recordReader.init(this);
+      recordReader.getRecord(docId, reuse);
       return reuse;
     } catch (Exception e) {
-      throw new RuntimeException("Failed to use PinotSegmentRecordReader to read immutable segment");
+      throw new RuntimeException("Caught exception while reading record for docId: " + docId, e);
+    }
+  }
+
+  @Override
+  public Object getValue(int docId, String column) {
+    try (PinotSegmentColumnReader columnReader = new PinotSegmentColumnReader(this, column)) {
+      return columnReader.getValue(docId);
+    } catch (Exception e) {
+      throw new RuntimeException(
+          String.format("Caught exception while reading value for docId: %d, column: %s", docId, column), e);
     }
   }
 }

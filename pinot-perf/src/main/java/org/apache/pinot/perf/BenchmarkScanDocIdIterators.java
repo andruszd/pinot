@@ -19,6 +19,7 @@
 package org.apache.pinot.perf;
 
 import java.io.File;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
@@ -122,7 +123,7 @@ public class BenchmarkScanDocIdIterators {
 
   @Benchmark
   public MutableRoaringBitmap benchmarkSVLong() {
-    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs).applyAnd(_bitmap);
+    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs, null).applyAnd(_bitmap);
   }
 
   public static class DummyPredicateEvaluator implements PredicateEvaluator {
@@ -131,6 +132,11 @@ public class BenchmarkScanDocIdIterators {
 
     public DummyPredicateEvaluator(int threshold) {
       _threshold = threshold;
+    }
+
+    @Override
+    public Predicate getPredicate() {
+      return null;
     }
 
     @Override
@@ -215,6 +221,11 @@ public class BenchmarkScanDocIdIterators {
 
     @Override
     public boolean applySV(double value) {
+      return false;
+    }
+
+    @Override
+    public boolean applySV(BigDecimal value) {
       return false;
     }
 

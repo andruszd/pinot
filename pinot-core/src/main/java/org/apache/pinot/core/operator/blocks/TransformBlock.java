@@ -47,11 +47,15 @@ public class TransformBlock implements Block {
     return _projectionBlock.getNumDocs();
   }
 
+  public int[] getDocIds() {
+    return _projectionBlock.getDocIds();
+  }
+
   public BlockValSet getBlockValueSet(ExpressionContext expression) {
     if (expression.getType() == ExpressionContext.Type.IDENTIFIER) {
       return _projectionBlock.getBlockValueSet(expression.getIdentifier());
     } else {
-      return new TransformBlockValSet(_projectionBlock, _transformFunctionMap.get(expression));
+      return new TransformBlockValSet(_projectionBlock, _transformFunctionMap.get(expression), expression);
     }
   }
 

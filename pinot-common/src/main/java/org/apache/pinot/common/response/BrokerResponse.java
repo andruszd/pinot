@@ -20,6 +20,7 @@ package org.apache.pinot.common.response;
 
 import java.util.List;
 import org.apache.pinot.common.response.broker.QueryProcessingException;
+import org.apache.pinot.common.response.broker.ResultTable;
 
 
 /**
@@ -50,16 +51,6 @@ public interface BrokerResponse {
    * Set the total time used in request handling, into the broker response.
    */
   void setTimeUsedMs(long timeUsedMs);
-
-  /**
-   * Set the total thread cpu time used against realtime table in request handling, into the broker response.
-   */
-  void setRealtimeThreadCpuTimeNs(long realtimeThreadCpuTimeNs);
-
-  /**
-   * Set the total thread cpu time used against offline table in request handling, into the broker response.
-   */
-  void setOfflineThreadCpuTimeNs(long offlineThreadCpuTimeNs);
 
   /**
    * Set the total number of rows in result set
@@ -118,6 +109,16 @@ public interface BrokerResponse {
   long getNumConsumingSegmentsQueried();
 
   /**
+   * Get number of consuming segments processed by server after server side pruning
+   */
+  long getNumConsumingSegmentsProcessed();
+
+  /**
+   * Get number of consuming segments that had at least one matching document
+   */
+  long getNumConsumingSegmentsMatched();
+
+  /**
    * Get the minimum freshness timestamp across consuming segments that were queried
    */
   long getMinConsumingFreshnessTimeMs();
@@ -138,22 +139,190 @@ public interface BrokerResponse {
   int getExceptionsSize();
 
   /**
+   * set the result table.
+   * @param resultTable result table to be set.
+   */
+  void setResultTable(ResultTable resultTable);
+
+  /**
+   * Get the result table.
+   * @return result table.
+   */
+  ResultTable getResultTable();
+
+  /**
    * Get the list of exceptions
    */
   List<QueryProcessingException> getProcessingExceptions();
 
   /**
-   * Get the total thread cpu time used against realtime table in request handling, into the broker response.
+   * Get the total number of rows in result set
    */
-  long getRealtimeThreadCpuTimeNs();
+  int getNumRowsResultSet();
 
   /**
-   * Get the total thread cpu time used against offline table in request handling, into the broker response.
+   * Set the total thread cpu time used against offline table in request handling, into the broker response.
+   */
+  void setOfflineThreadCpuTimeNs(long offlineThreadCpuTimeNs);
+
+  /**
+   * Get the thread cpu time used against offline table in request handling, from the broker response.
    */
   long getOfflineThreadCpuTimeNs();
 
   /**
-   * Get the total number of rows in result set
+   * Get the thread cpu time used against realtime table in request handling, from the broker response.
    */
-  int getNumRowsResultSet();
+  long getRealtimeThreadCpuTimeNs();
+
+  /**
+   * Set the total thread cpu time used against realtime table in request handling, into the broker response.
+   */
+  void setRealtimeThreadCpuTimeNs(long realtimeThreadCpuTimeNs);
+
+  /**
+   * Get the system activities cpu time used against offline table in request handling, from the broker response.
+   */
+  long getOfflineSystemActivitiesCpuTimeNs();
+
+  /**
+   * Set the system activities cpu time used against offline table in request handling, into the broker response.
+   */
+  void setOfflineSystemActivitiesCpuTimeNs(long offlineSystemActivitiesCpuTimeNs);
+
+  /**
+   * Get the system activities cpu time used against realtime table in request handling, from the broker response.
+   */
+  long getRealtimeSystemActivitiesCpuTimeNs();
+
+  /**
+   * Set the system activities cpu time used against realtime table in request handling, into the broker response.
+   */
+  void setRealtimeSystemActivitiesCpuTimeNs(long realtimeSystemActivitiesCpuTimeNs);
+
+  /**
+   * Get the response serialization cpu time used against offline table in request handling, from the broker response.
+   */
+  long getOfflineResponseSerializationCpuTimeNs();
+
+  /**
+   * Set the response serialization cpu time used against offline table in request handling, into the broker response.
+   */
+  void setOfflineResponseSerializationCpuTimeNs(long offlineResponseSerializationCpuTimeNs);
+
+  /**
+   * Get the response serialization cpu time used against realtime table in request handling, from the broker response.
+   */
+  long getRealtimeResponseSerializationCpuTimeNs();
+
+  /**
+   * Set the response serialization cpu time used against realtime table in request handling, into the broker response.
+   */
+  void setRealtimeResponseSerializationCpuTimeNs(long realtimeResponseSerializationCpuTimeNs);
+
+  /**
+   * Get the total cpu time(thread cpu time + system activities cpu time + response serialization cpu time) used
+   * against offline table in request handling, from the broker response.
+   */
+  long getOfflineTotalCpuTimeNs();
+
+  /**
+   * Set the total cpu time(thread cpu time + system activities cpu time + response serialization cpu time) used
+   * against offline table in request handling, into the broker response.
+   */
+  void setOfflineTotalCpuTimeNs(long offlineTotalCpuTimeNs);
+
+  /**
+   * Get the total cpu time(thread cpu time + system activities cpu time + response serialization cpu time) used
+   * against realtime table in request handling, from the broker response.
+   */
+  long getRealtimeTotalCpuTimeNs();
+
+  /**
+   * Set the total cpu time(thread cpu time + system activities cpu time + response serialization cpu time) used
+   * against realtime table in request handling, into the broker response.
+   */
+  void setRealtimeTotalCpuTimeNs(long realtimeTotalCpuTimeNs);
+
+  /**
+   * Get the total number of segments pruned on the Broker side
+   */
+  long getNumSegmentsPrunedByBroker();
+
+  /**
+   * Set the total number of segments pruned on the Broker side
+   */
+  void setNumSegmentsPrunedByBroker(long numSegmentsPrunedByBroker);
+
+  /**
+   * Get the total number of segments pruned on the Server side
+   */
+  long getNumSegmentsPrunedByServer();
+
+  /**
+   * Set the total number of segments pruned on the Server side
+   */
+  void setNumSegmentsPrunedByServer(long numSegmentsPrunedByServer);
+
+  /**
+   * Get the total number of segments pruned due to invalid data or schema.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  long getNumSegmentsPrunedInvalid();
+
+  /**
+   * Set the total number of segments pruned due to invalid data or schema.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  void setNumSegmentsPrunedInvalid(long numSegmentsPrunedInvalid);
+
+  /**
+   * Get the total number of segments pruned by applying the limit optimization.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  long getNumSegmentsPrunedByLimit();
+
+  /**
+   * Set the total number of segments pruned by applying the limit optimization.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  void setNumSegmentsPrunedByLimit(long numSegmentsPrunedByLimit);
+
+  /**
+   * Get the total number of segments pruned applying value optimizations, like bloom filters.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  long getNumSegmentsPrunedByValue();
+
+  /**
+   * Set the total number of segments pruned applying value optimizations, like bloom filters.
+   *
+   * This value is always lower or equal than {@link #getNumSegmentsPrunedByServer()}
+   */
+  void setNumSegmentsPrunedByValue(long numSegmentsPrunedByValue);
+
+  /**
+   * Get the total number of segments with an EmptyFilterOperator when Explain Plan is called
+   */
+  long getExplainPlanNumEmptyFilterSegments();
+
+  /**
+   * Set the total number of segments with an EmptyFilterOperator when Explain Plan is called
+   */
+  void setExplainPlanNumEmptyFilterSegments(long explainPlanNumEmptyFilterSegments);
+
+  /**
+   * Get the total number of segments with a MatchAllFilterOperator when Explain Plan is called
+   */
+  long getExplainPlanNumMatchAllFilterSegments();
+
+  /**
+   * Set the total number of segments with a MatchAllFilterOperator when Explain Plan is called
+   */
+  void setExplainPlanNumMatchAllFilterSegments(long explainPlanNumMatchAllFilterSegments);
 }

@@ -33,7 +33,7 @@ import 'codemirror/addon/hint/show-hint';
 import 'codemirror/addon/hint/sql-hint';
 import 'codemirror/addon/hint/show-hint.css';
 import NativeCodeMirror from 'codemirror';
-import _ from 'lodash';
+import { forEach, uniqBy, range as _range } from 'lodash';
 import FormControlLabel from '@material-ui/core/FormControlLabel';
 import Switch from '@material-ui/core/Switch';
 import exportFromJSON from 'export-from-json';
@@ -46,6 +46,7 @@ import SimpleAccordion from '../components/SimpleAccordion';
 import PinotMethodUtils from '../utils/PinotMethodUtils';
 import '../styles/styles.css';
 import {Resizable} from "re-resizable";
+import { useHistory, useLocation } from 'react-router';
 
 const useStyles = makeStyles((theme) => ({
   title: {
@@ -138,11 +139,26 @@ const responseStatCols = [
   'partialResponse',
   'minConsumingFreshnessTimeMs',
   'offlineThreadCpuTimeNs',
-  'realtimeThreadCpuTimeNs'
+  'realtimeThreadCpuTimeNs',
+  'offlineSystemActivitiesCpuTimeNs',
+  'realtimeSystemActivitiesCpuTimeNs',
+  'offlineResponseSerializationCpuTimeNs',
+  'realtimeResponseSerializationCpuTimeNs',
+  'offlineTotalCpuTimeNs',
+  'realtimeTotalCpuTimeNs'
 ];
+
+// A custom hook that builds on useLocation to parse the query string
+function useQuery() {
+  const { search } = useLocation();
+
+  return React.useMemo(() => new URLSearchParams(search), [search]);
+}
 
 const QueryPage = () => {
   const classes = useStyles();
+  const history = useHistory();
+  let queryParam = useQuery();
   const [fetching, setFetching] = useState(true);
   const [queryLoader, setQueryLoader] = useState(false);
   const [tableList, setTableList] = useState<TableData>({
@@ -161,9 +177,9 @@ const QueryPage = () => {
 
   const [selectedTable, setSelectedTable] = useState('');
 
-  const [inputQuery, setInputQuery] = useState('');
+  const [inputQuery, setInputQuery] = useState(queryParam.get('query') || '');
 
-  const [queryTimeout, setQueryTimeout] = useState('');
+  const [queryTimeout, setQueryTimeout] = useState(Number(queryParam.get('timeout') || '') || '');
 
   const [outputResult, setOutputResult] = useState('');
 
@@ -174,11 +190,16 @@ const QueryPage = () => {
     records: [],
   });
 
+  const [warnings, setWarnings] = useState<Array<string>>([]);
+
   const [checked, setChecked] = React.useState({
-    tracing: false,
-    querySyntaxPQL: false,
+    tracing: queryParam.get('tracing') === 'true',
+    useMSE: queryParam.get('useMSE') === 'true',
     showResultJSON: false,
   });
+
+  const queryExecuted = React.useRef(false);
+  const [boolFlag, setBoolFlag] = useState(false);
 
   const [copyMsg, showCopyMsg] = React.useState(false);
 
@@ -189,47 +210,118 @@ const QueryPage = () => {
   const handleOutputDataChange = (editor, data, value) => {
     setInputQuery(value);
   };
-  
+
   const handleQueryInterfaceKeyDown = (editor, event) => {
     // Map Cmd + Enter KeyPress to executing the query
     if (event.metaKey == true && event.keyCode == 13) {
-      handleRunNow(editor.getValue())
+      handleRunNow(editor.getValue());
     }
+    // Map Cmd + / KeyPress to toggle commenting the query
+    if (event.metaKey == true && event.keyCode == 191) {
+      handleComment(editor);
+    }
+  }
+
+  const handleComment = (cm: NativeCodeMirror.Editor) => {
+    const selections = cm.listSelections();
+    if (!selections) {
+      return;
+    }
+    const query = cm.getValue();
+    const querySplit = query.split(/\r?\n/);
+    forEach(selections, (range) => {
+      // anchor and head are based on where the selection starts/ends, but for the purpose
+      // of determining the line number range of the selection, we need start/end in order.
+      const start = Math.min(range.anchor.line, range.head.line);
+      let end = Math.max(range.anchor.line, range.head.line);
+
+      const isSingleLineSelection = start === end;
+      const isLastLineFirstChar = (range.anchor.line === end && range.anchor.ch === 0) ||
+          (range.head.line === end && range.head.ch === 0);
+      // If the selection is on the last line and the first character, we do not comment that line.
+      // This happens if you are using shift + down to select lines.
+      if (isLastLineFirstChar && !isSingleLineSelection) {
+        end = end - 1;
+      }
+      const isEntireSelectionCommented = _range(start, end + 1).every((line) => {
+        return querySplit[line].startsWith("--") || querySplit[line].trim().length === 0;
+      });
+
+      for (let line = start; line <= end; line++) {
+        const lineIsCommented = querySplit[line].startsWith("--");
+        const lineIsEmpty = querySplit[line].trim().length === 0;
+        if (isEntireSelectionCommented) {
+          // If the entire range is commented, then we uncomment all the lines
+          if (lineIsCommented) {
+            querySplit[line] = querySplit[line].replace(/^--\s*/, '');
+          }
+        }
+        else {
+          // If the range is not commented, then we comment all the uncommented lines
+          if (!lineIsEmpty && !lineIsCommented) {
+            querySplit[line] = `-- ${querySplit[line]}`;
+          }
+        }
+      }
+    });
+    setInputQuery(querySplit.join("\n"));
   }
 
   const handleRunNow = async (query?: string) => {
     setQueryLoader(true);
-    let url;
+    queryExecuted.current = true;
     let params;
-    let timeoutStr = '';
-    if(queryTimeout !== ''){
-      timeoutStr = ` option(timeoutMs=${parseInt(queryTimeout, 10)})`
+    let queryOptions = '';
+    if(queryTimeout){
+      queryOptions += `timeoutMs=${queryTimeout}`;
     }
-    if (checked.querySyntaxPQL) {
-      url = 'pql';
-      params = JSON.stringify({
-        pql: `${query || inputQuery.trim()}${timeoutStr}`,
-        trace: checked.tracing,
-      });
-    } else {
-      url = 'sql';
-      params = JSON.stringify({
-        sql: `${query || inputQuery.trim()}${timeoutStr}`,
-        trace: checked.tracing,
-      });
+    if(checked.useMSE){
+      queryOptions += `useMultistageEngine=true`;
+    }
+    const finalQuery = `${query || inputQuery.trim()}`;
+    params = JSON.stringify({
+      sql: `${finalQuery}`,
+      trace: checked.tracing,
+      queryOptions: `${queryOptions}`,
+    });
+
+    if(finalQuery !== ''){
+      queryParam.set('query', finalQuery);
+      queryParam.set('tracing', checked.tracing.toString());
+      queryParam.set('useMSE', checked.useMSE.toString());
+      if(queryTimeout !== undefined && queryTimeout !== ''){
+        queryParam.set('timeout', queryTimeout.toString());
+      }
+      history.push({
+        pathname: '/query',
+        search: `?${queryParam.toString()}`
+      })
     }
 
-    const results = await PinotMethodUtils.getQueryResults(
-      params,
-      url,
-      checked
-    );
+    const results = await PinotMethodUtils.getQueryResults(params);
     setResultError(results.error || '');
     setResultData(results.result || { columns: [], records: [] });
     setQueryStats(results.queryStats || { columns: responseStatCols, records: [] });
     setOutputResult(JSON.stringify(results.data, null, 2) || '');
+    setWarnings(extractWarnings(results));
     setQueryLoader(false);
+    queryExecuted.current = false;
   };
+
+  const extractWarnings = (result) => {
+    const warnings: Array<string> = [];
+    const numSegmentsPrunedInvalid = result.data.numSegmentsPrunedInvalid;
+    if (numSegmentsPrunedInvalid) {
+      warnings.push(`There are ${numSegmentsPrunedInvalid} invalid segment/s. This usually means that they were `
+         + `created with an older schema. `
+         + `Please reload the table in order to refresh these segments to the new schema.`);
+    }
+    if (checked.useMSE) {
+      warnings.push(`Using V2 Multi-Stage Query Engine. This is an experimental feature. Please report any bugs to `
+          + `Apache Pinot Slack channel.`);
+    }
+    return warnings;
+  }
 
   const fetchSQLData = async (tableName) => {
     setQueryLoader(true);
@@ -284,7 +376,31 @@ const QueryPage = () => {
 
   useEffect(() => {
     fetchData();
+    if(inputQuery){
+      handleRunNow(inputQuery);
+    }
   }, []);
+
+  useEffect(()=>{
+    const query = queryParam.get('query');
+    if(!queryExecuted.current && query){
+      setInputQuery(query);
+      setChecked({
+        tracing: queryParam.get('tracing') === 'true',
+        useMSE: queryParam.get('useMse') === 'true',
+        showResultJSON: checked.showResultJSON,
+      });
+      setQueryTimeout(Number(queryParam.get('timeout') || '') || '');
+      setBoolFlag(!boolFlag);
+    }
+  }, [queryParam]);
+
+  useEffect(()=>{
+    const query = queryParam.get('query');
+    if(!queryExecuted.current && query){
+      handleRunNow();
+    }
+  }, [boolFlag]);
 
   const handleSqlHints = (cm: NativeCodeMirror.Editor) => {
     const tableNames = [];
@@ -318,7 +434,7 @@ const QueryPage = () => {
 
     Array.prototype.push.apply(defaultHint.list, finalList);
 
-    defaultHint.list = _.uniqBy(defaultHint.list, 'text');
+    defaultHint.list = uniqBy(defaultHint.list, 'text');
     return defaultHint;
   };
 
@@ -389,18 +505,18 @@ const QueryPage = () => {
 
               <Grid item xs={2}>
                 <Checkbox
-                  name="querySyntaxPQL"
-                  color="primary"
-                  onChange={handleChange}
-                  checked={checked.querySyntaxPQL}
+                    name="useMSE"
+                    color="primary"
+                    onChange={handleChange}
+                    checked={checked.useMSE}
                 />
-                Query Syntax: PQL
+                Use V2 Engine
               </Grid>
 
               <Grid item xs={3}>
                 <FormControl fullWidth={true} className={classes.timeoutControl}>
                   <InputLabel htmlFor="my-input">Timeout (in Milliseconds)</InputLabel>
-                  <Input id="my-input" type="number" value={queryTimeout} onChange={(e)=> setQueryTimeout(e.target.value)}/>
+                  <Input id="my-input" type="number" value={queryTimeout} onChange={(e)=> setQueryTimeout(Number(e.target.value) || '')}/>
                 </FormControl>
               </Grid>
 
@@ -419,23 +535,31 @@ const QueryPage = () => {
               <AppLoader />
             ) : (
               <>
+                {queryStats.columns.length ? (
+                    <Grid item xs style={{ backgroundColor: 'white' }}>
+                      <CustomizedTables
+                          title="Query Response Stats"
+                          data={queryStats}
+                          showSearchBox={true}
+                          inAccordionFormat={true}
+                      />
+                    </Grid>
+                ) : null}
+
+                {
+                  warnings.map(warn =>
+                                   <Alert severity="warning" className={classes.sqlError}>
+                                     {warn}
+                                   </Alert>
+                  )
+                }
+
                 {resultError ? (
                   <Alert severity="error" className={classes.sqlError}>
                     {resultError}
                   </Alert>
                 ) : (
                   <>
-                    {queryStats.columns.length ? (
-                      <Grid item xs style={{ backgroundColor: 'white' }}>
-                        <CustomizedTables
-                          title="Query Response Stats"
-                          data={queryStats}
-                          showSearchBox={true}
-                          inAccordionFormat={true}
-                        />
-                      </Grid>
-                    ) : null}
-
                     <Grid item xs style={{ backgroundColor: 'white' }}>
                       {resultData.columns.length ? (
                         <>
@@ -494,7 +618,6 @@ const QueryPage = () => {
                             <CustomizedTables
                               title="Query Result"
                               data={resultData}
-                              isPagination
                               isSticky={true}
                               showSearchBox={true}
                               inAccordionFormat={true}

@@ -30,6 +30,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
 
@@ -38,7 +40,7 @@ import org.apache.pinot.spi.env.PinotConfiguration;
  * Implementation of PinotFS for a local filesystem. Methods in this class may throw a SecurityException at runtime
  * if access to the file is denied.
  */
-public class LocalPinotFS extends PinotFS {
+public class LocalPinotFS extends BasePinotFS {
 
   @Override
   public void init(PinotConfiguration configuration) {
@@ -83,9 +85,9 @@ public class LocalPinotFS extends PinotFS {
   }
 
   @Override
-  public boolean copy(URI srcUri, URI dstUri)
+  public boolean copyDir(URI srcUri, URI dstUri)
       throws IOException {
-    copy(toFile(srcUri), toFile(dstUri));
+    copy(toFile(srcUri), toFile(dstUri), true);
     return true;
   }
 
@@ -116,15 +118,41 @@ public class LocalPinotFS extends PinotFS {
   }
 
   @Override
+  public List<FileMetadata> listFilesWithMetadata(URI fileUri, boolean recursive)
+      throws IOException {
+    File file = toFile(fileUri);
+    if (!recursive) {
+      return Arrays.stream(file.list()).map(s -> getFileMetadata(new File(file, s))).collect(Collectors.toList());
+    } else {
+      return Files.walk(Paths.get(fileUri)).filter(s -> !s.equals(file.toPath())).map(p -> getFileMetadata(p.toFile()))
+          .collect(Collectors.toList());
+    }
+  }
+
+  private static FileMetadata getFileMetadata(File file) {
+    return new FileMetadata.Builder().setFilePath(file.getAbsolutePath()).setLastModifiedTime(file.lastModified())
+        .setLength(file.length()).setIsDirectory(file.isDirectory()).build();
+  }
+
+  @Override
   public void copyToLocalFile(URI srcUri, File dstFile)
       throws Exception {
-    copy(toFile(srcUri), dstFile);
+    copy(toFile(srcUri), dstFile, false);
   }
 
   @Override
   public void copyFromLocalFile(File srcFile, URI dstUri)
       throws Exception {
-    copy(srcFile, toFile(dstUri));
+    copy(srcFile, toFile(dstUri), false);
+  }
+
+  @Override
+  public void copyFromLocalDir(File srcFile, URI dstUri)
+      throws Exception {
+    if (!srcFile.isDirectory()) {
+      throw new IllegalArgumentException(srcFile.getAbsolutePath() + " is not a directory");
+    }
+    copy(srcFile, toFile(dstUri), true);
   }
 
   @Override
@@ -163,14 +191,18 @@ public class LocalPinotFS extends PinotFS {
     }
   }
 
-  private static void copy(File srcFile, File dstFile)
+  private static void copy(File srcFile, File dstFile, boolean recursive)
       throws IOException {
     if (dstFile.exists()) {
       FileUtils.deleteQuietly(dstFile);
     }
     if (srcFile.isDirectory()) {
-      // Throws Exception on failure
-      FileUtils.copyDirectory(srcFile, dstFile);
+      if (recursive) {
+        FileUtils.copyDirectory(srcFile, dstFile);
+      } else {
+        // Throws Exception on failure
+        throw new IOException(srcFile.getAbsolutePath() + " is a directory and recursive copy is not enabled.");
+      }
     } else {
       // Will create parent directories, throws Exception on failure
       FileUtils.copyFile(srcFile, dstFile);

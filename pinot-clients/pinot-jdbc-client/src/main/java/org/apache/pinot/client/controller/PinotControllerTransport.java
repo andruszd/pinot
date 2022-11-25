@@ -18,15 +18,27 @@
  */
 package org.apache.pinot.client.controller;
 
-import com.ning.http.client.AsyncHttpClient;
-import com.ning.http.client.Response;
+import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.JdkSslContext;
+import java.io.IOException;
 import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.pinot.client.ConnectionTimeouts;
 import org.apache.pinot.client.PinotClientException;
+import org.apache.pinot.client.TlsProtocols;
 import org.apache.pinot.client.controller.response.ControllerTenantBrokerResponse;
 import org.apache.pinot.client.controller.response.SchemaResponse;
 import org.apache.pinot.client.controller.response.TableResponse;
+import org.asynchttpclient.AsyncHttpClient;
+import org.asynchttpclient.BoundRequestBuilder;
+import org.asynchttpclient.DefaultAsyncHttpClientConfig;
+import org.asynchttpclient.Dsl;
+import org.asynchttpclient.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,20 +47,50 @@ public class PinotControllerTransport {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotControllerTransport.class);
 
-  AsyncHttpClient _httpClient = new AsyncHttpClient();
   Map<String, String> _headers;
+  private final String _scheme;
+  private final AsyncHttpClient _httpClient;
 
-  public PinotControllerTransport() {
+  public PinotControllerTransport(Map<String, String> headers, String scheme, @Nullable SSLContext sslContext,
+      ConnectionTimeouts connectionTimeouts, TlsProtocols tlsProtocols, @Nullable String appId) {
+    _headers = headers;
+    _scheme = scheme;
+
+    DefaultAsyncHttpClientConfig.Builder builder = Dsl.config();
+    if (sslContext != null) {
+      builder.setSslContext(new JdkSslContext(sslContext, true, ClientAuth.OPTIONAL));
+    }
+
+    builder.setReadTimeout(connectionTimeouts.getReadTimeoutMs())
+        .setConnectTimeout(connectionTimeouts.getConnectTimeoutMs())
+        .setHandshakeTimeout(connectionTimeouts.getHandshakeTimeoutMs())
+        .setUserAgent(getUserAgentVersionFromClassPath(appId))
+        .setEnabledProtocols(tlsProtocols.getEnabledProtocols().toArray(new String[0]));
+
+    _httpClient = Dsl.asyncHttpClient(builder.build());
   }
 
-  public PinotControllerTransport(Map<String, String> headers) {
-    _headers = headers;
+  private String getUserAgentVersionFromClassPath(@Nullable String appId) {
+    Properties userAgentProperties = new Properties();
+    try {
+      userAgentProperties.load(
+          PinotControllerTransport.class.getClassLoader().getResourceAsStream("version.properties"));
+    } catch (IOException e) {
+      LOGGER.warn("Unable to set user agent version");
+    }
+    String userAgentFromProperties = userAgentProperties.getProperty("ua", "unknown");
+    if (StringUtils.isNotEmpty(appId)) {
+      return
+          appId.substring(0, Math.min(org.apache.pinot.client.utils.ConnectionUtils.APP_ID_MAX_CHARS, appId.length()))
+              + "-" + userAgentFromProperties;
+    }
+    return userAgentFromProperties;
   }
 
   public TableResponse getAllTables(String controllerAddress) {
     try {
-      String url = "http://" + controllerAddress + "/tables";
-      AsyncHttpClient.BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
+      String url = _scheme + "://" + controllerAddress + "/tables";
+      BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
       if (_headers != null) {
         _headers.forEach((k, v) -> requestBuilder.addHeader(k, v));
       }
@@ -65,8 +107,8 @@ public class PinotControllerTransport {
 
   public SchemaResponse getTableSchema(String table, String controllerAddress) {
     try {
-      String url = "http://" + controllerAddress + "/tables/" + table + "/schema";
-      AsyncHttpClient.BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
+      String url = _scheme + "://" + controllerAddress + "/tables/" + table + "/schema";
+      BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
       if (_headers != null) {
         _headers.forEach((k, v) -> requestBuilder.addHeader(k, v));
       }
@@ -83,8 +125,8 @@ public class PinotControllerTransport {
 
   public ControllerTenantBrokerResponse getBrokersFromController(String controllerAddress, String tenant) {
     try {
-      String url = "http://" + controllerAddress + "/v2/brokers/tenants/" + tenant;
-      AsyncHttpClient.BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
+      String url = _scheme + "://" + controllerAddress + "/v2/brokers/tenants/" + tenant;
+      BoundRequestBuilder requestBuilder = _httpClient.prepareGet(url);
       if (_headers != null) {
         _headers.forEach((k, v) -> requestBuilder.addHeader(k, v));
       }
@@ -105,6 +147,10 @@ public class PinotControllerTransport {
     if (_httpClient.isClosed()) {
       throw new PinotClientException("Connection is already closed!");
     }
-    _httpClient.close();
+    try {
+      _httpClient.close();
+    } catch (IOException exception) {
+      throw new PinotClientException("Error while closing connection!");
+    }
   }
 }

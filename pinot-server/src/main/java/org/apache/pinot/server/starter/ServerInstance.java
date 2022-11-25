@@ -19,25 +19,36 @@
 package org.apache.pinot.server.starter;
 
 import com.google.common.base.Preconditions;
+import io.netty.channel.ChannelHandler;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.LongAccumulator;
 import org.apache.helix.HelixManager;
+import org.apache.pinot.common.config.GrpcConfig;
+import org.apache.pinot.common.config.NettyConfig;
+import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.function.FunctionRegistry;
-import org.apache.pinot.common.metrics.PinotMetricUtils;
+import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMetrics;
+import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.version.PinotVersion;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
 import org.apache.pinot.core.operator.transform.function.TransformFunction;
 import org.apache.pinot.core.operator.transform.function.TransformFunctionFactory;
 import org.apache.pinot.core.query.executor.QueryExecutor;
 import org.apache.pinot.core.query.scheduler.QueryScheduler;
 import org.apache.pinot.core.query.scheduler.QuerySchedulerFactory;
+import org.apache.pinot.core.transport.ChannelHandlerFactory;
+import org.apache.pinot.core.transport.InstanceRequestHandler;
 import org.apache.pinot.core.transport.QueryServer;
-import org.apache.pinot.core.transport.TlsConfig;
 import org.apache.pinot.core.transport.grpc.GrpcQueryServer;
-import org.apache.pinot.core.util.TlsUtils;
+import org.apache.pinot.server.access.AccessControl;
+import org.apache.pinot.server.access.AccessControlFactory;
+import org.apache.pinot.server.access.AllowAllAccessFactory;
 import org.apache.pinot.server.conf.ServerConf;
+import org.apache.pinot.server.worker.WorkerQueryServer;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.metrics.PinotMetricUtils;
 import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.slf4j.Logger;
@@ -59,12 +70,19 @@ public class ServerInstance {
   private final QueryServer _nettyQueryServer;
   private final QueryServer _nettyTlsQueryServer;
   private final GrpcQueryServer _grpcQueryServer;
+  private final AccessControl _accessControl;
+  private final HelixManager _helixManager;
 
-  private boolean _started = false;
+  private final WorkerQueryServer _workerQueryServer;
+  private ChannelHandler _instanceRequestHandler;
 
-  public ServerInstance(ServerConf serverConf, HelixManager helixManager)
+  private boolean _dataManagerStarted = false;
+  private boolean _queryServerStarted = false;
+
+  public ServerInstance(ServerConf serverConf, HelixManager helixManager, AccessControlFactory accessControlFactory)
       throws Exception {
     LOGGER.info("Initializing server instance");
+    _helixManager = helixManager;
 
     LOGGER.info("Initializing server metrics");
     PinotMetricsRegistry metricsRegistry = PinotMetricUtils.getPinotMetricsRegistry(serverConf.getMetricsConfig());
@@ -72,6 +90,8 @@ public class ServerInstance {
         new ServerMetrics(serverConf.getMetricsPrefix(), metricsRegistry, serverConf.emitTableLevelMetrics(),
             serverConf.getAllowedTablesForEmittingMetrics());
     _serverMetrics.initializeGlobalMeters();
+    _serverMetrics.setValueOfGlobalGauge(ServerGauge.VERSION, PinotVersion.VERSION_METRIC_NAME, 1);
+    ServerMetrics.register(_serverMetrics);
 
     String instanceDataManagerClassName = serverConf.getInstanceDataManagerClassName();
     LOGGER.info("Initializing instance data manager of class: {}", instanceDataManagerClassName);
@@ -93,11 +113,28 @@ public class ServerInstance {
 
     TlsConfig tlsConfig =
         TlsUtils.extractTlsConfig(serverConf.getPinotConfig(), CommonConstants.Server.SERVER_TLS_PREFIX);
+    NettyConfig nettyConfig =
+        NettyConfig.extractNettyConfig(serverConf.getPinotConfig(), CommonConstants.Server.SERVER_NETTY_PREFIX);
+    accessControlFactory
+        .init(serverConf.getPinotConfig().subset(CommonConstants.Server.PREFIX_OF_CONFIG_OF_ACCESS_CONTROL),
+            helixManager);
+    _accessControl = accessControlFactory.create();
+
+    if (serverConf.isMultiStageServerEnabled()) {
+      LOGGER.info("Initializing Multi-stage query engine");
+      _workerQueryServer = new WorkerQueryServer(serverConf.getPinotConfig(), _instanceDataManager, helixManager,
+          _serverMetrics);
+    } else {
+      _workerQueryServer = null;
+    }
 
     if (serverConf.isNettyServerEnabled()) {
       int nettyPort = serverConf.getNettyPort();
       LOGGER.info("Initializing Netty query server on port: {}", nettyPort);
-      _nettyQueryServer = new QueryServer(nettyPort, _queryScheduler, _serverMetrics);
+      _instanceRequestHandler = ChannelHandlerFactory
+          .getInstanceRequestHandler(helixManager.getInstanceName(), serverConf.getPinotConfig(), _queryScheduler,
+              _serverMetrics, new AllowAllAccessFactory().create());
+      _nettyQueryServer = new QueryServer(nettyPort, nettyConfig, _instanceRequestHandler);
     } else {
       _nettyQueryServer = null;
     }
@@ -105,19 +142,20 @@ public class ServerInstance {
     if (serverConf.isNettyTlsServerEnabled()) {
       int nettySecPort = serverConf.getNettyTlsPort();
       LOGGER.info("Initializing TLS-secured Netty query server on port: {}", nettySecPort);
-      _nettyTlsQueryServer = new QueryServer(nettySecPort, _queryScheduler, _serverMetrics, tlsConfig);
+      _instanceRequestHandler = ChannelHandlerFactory
+          .getInstanceRequestHandler(helixManager.getInstanceName(), serverConf.getPinotConfig(), _queryScheduler,
+              _serverMetrics, _accessControl);
+      _nettyTlsQueryServer = new QueryServer(nettySecPort, nettyConfig, tlsConfig, _instanceRequestHandler);
     } else {
       _nettyTlsQueryServer = null;
     }
-
     if (serverConf.isEnableGrpcServer()) {
-      if (tlsConfig.isCustomized()) {
-        LOGGER.warn("gRPC query server does not support TLS yet");
-      }
-
       int grpcPort = serverConf.getGrpcPort();
       LOGGER.info("Initializing gRPC query server on port: {}", grpcPort);
-      _grpcQueryServer = new GrpcQueryServer(grpcPort, _queryExecutor, _serverMetrics);
+      _grpcQueryServer = new GrpcQueryServer(grpcPort, GrpcConfig.buildGrpcQueryConfig(serverConf.getPinotConfig()),
+          serverConf.isGrpcTlsServerEnabled() ? TlsUtils
+              .extractTlsConfig(serverConf.getPinotConfig(), CommonConstants.Server.SERVER_GRPCTLS_PREFIX) : null,
+          _queryExecutor, _serverMetrics, _accessControl);
     } else {
       _grpcQueryServer = null;
     }
@@ -137,18 +175,28 @@ public class ServerInstance {
     LOGGER.info("Finish initializing server instance");
   }
 
-  public synchronized void start() {
+  public synchronized void startDataManager() {
     // This method is called when Helix starts a new ZK session, and can be called multiple times. We only need to start
-    // the server instance once, and simply ignore the following invocations.
-    if (_started) {
-      LOGGER.info("Server instance is already running, skipping the start");
+    // the data manager once, and simply ignore the following invocations.
+    if (_dataManagerStarted) {
+      LOGGER.info("Data manager is already running, skipping the start");
       return;
     }
 
-    LOGGER.info("Starting server instance");
-
-    LOGGER.info("Starting instance data manager");
+    LOGGER.info("Starting data manager");
     _instanceDataManager.start();
+    _dataManagerStarted = true;
+    LOGGER.info("Finish starting data manager");
+  }
+
+  public synchronized void startQueryServer() {
+    if (_queryServerStarted) {
+      LOGGER.warn("Query server is already running, skipping the start");
+      return;
+    }
+
+    LOGGER.info("Starting query server");
+
     LOGGER.info("Starting query executor");
     _queryExecutor.start();
     LOGGER.info("Starting query scheduler");
@@ -165,36 +213,57 @@ public class ServerInstance {
       LOGGER.info("Starting gRPC query server");
       _grpcQueryServer.start();
     }
+    if (_workerQueryServer != null) {
+      LOGGER.info("Starting worker query server");
+      _workerQueryServer.start();
+    }
 
-    _started = true;
-    LOGGER.info("Finish starting server instance");
+    _queryServerStarted = true;
+    LOGGER.info("Finish starting query server");
   }
 
   public synchronized void shutDown() {
-    Preconditions.checkState(_started, "Server instance is not running");
+    if (!_dataManagerStarted) {
+      LOGGER.warn("Server instance is not running, skipping the shut down");
+      return;
+    }
+
     LOGGER.info("Shutting down server instance");
 
-    if (_nettyTlsQueryServer != null) {
-      LOGGER.info("Shutting down TLS-secured Netty query server");
-      _nettyTlsQueryServer.shutDown();
+    if (_queryServerStarted) {
+      LOGGER.info("Shutting down query server");
+
+      if (_nettyQueryServer != null) {
+        LOGGER.info("Shutting down Netty query server");
+        _nettyQueryServer.shutDown();
+      }
+      if (_nettyTlsQueryServer != null) {
+        LOGGER.info("Shutting down TLS-secured Netty query server");
+        _nettyTlsQueryServer.shutDown();
+      }
+      if (_grpcQueryServer != null) {
+        LOGGER.info("Shutting down gRPC query server");
+        _grpcQueryServer.shutdown();
+      }
+      if (_workerQueryServer != null) {
+        LOGGER.info("Shutting down worker query server");
+        _workerQueryServer.shutDown();
+      }
+      LOGGER.info("Shutting down query scheduler");
+      _queryScheduler.stop();
+      LOGGER.info("Shutting down query executor");
+      _queryExecutor.shutDown();
+
+      _queryServerStarted = false;
+      LOGGER.info("Finish shutting down query server");
     }
-    if (_grpcQueryServer != null) {
-      LOGGER.info("Shutting down gRPC query server");
-      _grpcQueryServer.shutdown();
-    }
-    if (_nettyQueryServer != null) {
-      LOGGER.info("Shutting down Netty query server");
-      _nettyQueryServer.shutDown();
-    }
-    LOGGER.info("Shutting down query scheduler");
-    _queryScheduler.stop();
-    LOGGER.info("Shutting down query executor");
-    _queryExecutor.shutDown();
-    LOGGER.info("Shutting down instance data manager");
+
+    LOGGER.info("Shutting down data manager");
     _instanceDataManager.shutDown();
     LOGGER.info("Shutting down metrics registry");
     _serverMetrics.getMetricsRegistry().shutdown();
-    _started = false;
+
+    _dataManagerStarted = false;
     LOGGER.info("Finish shutting down server instance");
   }
 
@@ -208,5 +277,15 @@ public class ServerInstance {
 
   public long getLatestQueryTime() {
     return _latestQueryTime.get();
+  }
+
+  public InstanceRequestHandler getInstanceRequestHandler() {
+    Preconditions.checkState(_instanceRequestHandler instanceof InstanceRequestHandler,
+        "Unexpected type of instance request handler");
+    return (InstanceRequestHandler) _instanceRequestHandler;
+  }
+
+  public HelixManager getHelixManager() {
+    return _helixManager;
   }
 }

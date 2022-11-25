@@ -114,10 +114,15 @@ const SegmentDetails = ({ match }: RouteComponentProps<Props>) => {
     records: []
   });
 
+  const [indexes, setIndexes] = useState({
+      columns: [],
+      records: []
+  });
   const [value, setValue] = useState('');
   const fetchData = async () => {
     const result = await PinotMethodUtils.getSegmentDetails(tableName, segmentName);
     setSegmentSummary(result.summary);
+    setIndexes(result.indexes);
     setReplica(result.replicaSet);
     setValue(JSON.stringify(result.JSON, null, 2));
     setFetching(false);
@@ -230,7 +235,6 @@ const SegmentDetails = ({ match }: RouteComponentProps<Props>) => {
           <CustomizedTables
             title="Replica Set"
             data={replica}
-            isPagination={true}
             showSearchBox={true}
             inAccordionFormat={true}
           />
@@ -250,7 +254,18 @@ const SegmentDetails = ({ match }: RouteComponentProps<Props>) => {
             </SimpleAccordion>
           </div>
         </Grid>
+
       </Grid>
+
+              <Grid item xs={12}>
+                <CustomizedTables
+                  title="Indexes"
+                  data={indexes}
+                  showSearchBox={true}
+                  inAccordionFormat={true}
+                />
+              </Grid>
+
       {confirmDialog && dialogDetails && <Confirm
         openDialog={confirmDialog}
         dialogTitle={dialogDetails.title}

@@ -24,13 +24,20 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
 public class GeneratorFactory {
+
   private GeneratorFactory() {
   }
 
   public static Generator getGeneratorFor(DataType type, Integer cardinality, Double numberOfValuesPerEntry,
       Integer entryLength, TimeUnit timeUnit) {
+    if (type == DataType.BOOLEAN) {
+      return new BooleanGenerator(numberOfValuesPerEntry);
+    }
     if (type == DataType.STRING) {
       return new StringGenerator(cardinality, numberOfValuesPerEntry, entryLength);
+    }
+    if (type == DataType.JSON) {
+      return new JsonGenerator(entryLength);
     }
     if (type == DataType.BYTES) {
       return new BytesGenerator(cardinality, entryLength);

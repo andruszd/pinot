@@ -18,100 +18,102 @@
  */
 package org.apache.pinot.core.operator;
 
+import java.util.Collections;
 import java.util.List;
-import org.apache.pinot.common.utils.DataTable.MetadataKey;
+import org.apache.pinot.common.datatable.DataTable.MetadataKey;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.blocks.InstanceResponseBlock;
-import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
+import org.apache.pinot.core.operator.blocks.results.BaseResultsBlock;
 import org.apache.pinot.core.operator.combine.BaseCombineOperator;
-import org.apache.pinot.core.query.request.context.ThreadTimer;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.segment.spi.FetchContext;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
 
 
 public class InstanceResponseOperator extends BaseOperator<InstanceResponseBlock> {
-  private static final String OPERATOR_NAME = "InstanceResponseOperator";
+  private static final String EXPLAIN_NAME = "INSTANCE_RESPONSE";
 
-  private final BaseCombineOperator _combineOperator;
+  private final BaseCombineOperator<?> _combineOperator;
   private final List<IndexSegment> _indexSegments;
   private final List<FetchContext> _fetchContexts;
   private final int _fetchContextSize;
+  private final QueryContext _queryContext;
 
-  public InstanceResponseOperator(BaseCombineOperator combinedOperator, List<IndexSegment> indexSegments,
-      List<FetchContext> fetchContexts) {
-    _combineOperator = combinedOperator;
+  public InstanceResponseOperator(BaseCombineOperator<?> combineOperator, List<IndexSegment> indexSegments,
+      List<FetchContext> fetchContexts, QueryContext queryContext) {
+    _combineOperator = combineOperator;
     _indexSegments = indexSegments;
     _fetchContexts = fetchContexts;
     _fetchContextSize = fetchContexts.size();
+    _queryContext = queryContext;
+  }
+
+  /*
+   * Derive systemActivitiesCpuTimeNs from totalWallClockTimeNs, multipleThreadCpuTimeNs, mainThreadCpuTimeNs,
+   * and numServerThreads.
+   *
+   * For example, let's divide query processing into 4 phases:
+   * - phase 1: single thread (main thread) preparing. Time used: T1
+   * - phase 2: N threads processing segments in parallel, each thread use time T2
+   * - phase 3: system activities (GC/OS paging). Time used: T3
+   * - phase 4: single thread (main thread) merging intermediate results blocks. Time used: T4
+   *
+   * Then we have following equations:
+   * - mainThreadCpuTimeNs = T1 + T4
+   * - multipleThreadCpuTimeNs = T2 * N
+   * - totalWallClockTimeNs = T1 + T2 + T3 + T4 = mainThreadCpuTimeNs + T2 + T3
+   * - systemActivitiesCpuTimeNs = T3 = totalWallClockTimeNs - mainThreadCpuTimeNs - T2
+   */
+  public static long calSystemActivitiesCpuTimeNs(long totalWallClockTimeNs, long multipleThreadCpuTimeNs,
+      long mainThreadCpuTimeNs, int numServerThreads) {
+    double perMultipleThreadCpuTimeNs = multipleThreadCpuTimeNs * 1.0 / numServerThreads;
+    long systemActivitiesCpuTimeNs =
+        Math.round(totalWallClockTimeNs - mainThreadCpuTimeNs - perMultipleThreadCpuTimeNs);
+    // systemActivitiesCpuTimeNs should not be negative, this is just a defensive check
+    return Math.max(systemActivitiesCpuTimeNs, 0);
   }
 
   @Override
   protected InstanceResponseBlock getNextBlock() {
-    if (ThreadTimer.isThreadCpuTimeMeasurementEnabled()) {
+    if (ThreadResourceUsageProvider.isThreadCpuTimeMeasurementEnabled()) {
       long startWallClockTimeNs = System.nanoTime();
-      IntermediateResultsBlock intermediateResultsBlock = getCombinedResults();
-      InstanceResponseBlock instanceResponseBlock = new InstanceResponseBlock(intermediateResultsBlock);
-      long totalWallClockTimeNs = System.nanoTime() - startWallClockTimeNs;
 
+      ThreadResourceUsageProvider mainThreadResourceUsageProvider = new ThreadResourceUsageProvider();
+      BaseResultsBlock resultsBlock = getCombinedResults();
+      InstanceResponseBlock instanceResponseBlock = new InstanceResponseBlock(resultsBlock, _queryContext);
+      long mainThreadCpuTimeNs = mainThreadResourceUsageProvider.getThreadTimeNs();
+
+      long totalWallClockTimeNs = System.nanoTime() - startWallClockTimeNs;
       /*
        * If/when the threadCpuTime based instrumentation is done for other parts of execution (planning, pruning etc),
        * we will have to change the wallClockTime computation accordingly. Right now everything under
        * InstanceResponseOperator is the one that is instrumented with threadCpuTime.
        */
-      long multipleThreadCpuTimeNs = intermediateResultsBlock.getExecutionThreadCpuTimeNs();
-      int numServerThreads = intermediateResultsBlock.getNumServerThreads();
-      long totalThreadCpuTimeNs =
-          calTotalThreadCpuTimeNs(totalWallClockTimeNs, multipleThreadCpuTimeNs, numServerThreads);
+      long multipleThreadCpuTimeNs = resultsBlock.getExecutionThreadCpuTimeNs();
+      int numServerThreads = resultsBlock.getNumServerThreads();
+      long systemActivitiesCpuTimeNs =
+          calSystemActivitiesCpuTimeNs(totalWallClockTimeNs, multipleThreadCpuTimeNs, mainThreadCpuTimeNs,
+              numServerThreads);
 
-      instanceResponseBlock.getInstanceResponseDataTable().getMetadata()
-          .put(MetadataKey.THREAD_CPU_TIME_NS.getName(), String.valueOf(totalThreadCpuTimeNs));
+      long threadCpuTimeNs = mainThreadCpuTimeNs + multipleThreadCpuTimeNs;
+      instanceResponseBlock.addMetadata(MetadataKey.THREAD_CPU_TIME_NS.getName(), String.valueOf(threadCpuTimeNs));
+      instanceResponseBlock.addMetadata(MetadataKey.SYSTEM_ACTIVITIES_CPU_TIME_NS.getName(),
+          String.valueOf(systemActivitiesCpuTimeNs));
+
       return instanceResponseBlock;
     } else {
-      return new InstanceResponseBlock(getCombinedResults());
+      return new InstanceResponseBlock(getCombinedResults(), _queryContext);
     }
   }
 
-  private IntermediateResultsBlock getCombinedResults() {
+  private BaseResultsBlock getCombinedResults() {
     try {
       prefetchAll();
       return _combineOperator.nextBlock();
     } finally {
       releaseAll();
     }
-  }
-
-  /*
-   * Calculate totalThreadCpuTimeNs based on totalWallClockTimeNs, multipleThreadCpuTimeNs, and numServerThreads.
-   * System activities time such as OS paging, GC, context switching are not captured by totalThreadCpuTimeNs.
-   * For example, let's divide query processing into 4 phases:
-   * - phase 1: single thread preparing. Time used: T1
-   * - phase 2: N threads processing segments in parallel, each thread use time T2
-   * - phase 3: GC/OS paging. Time used: T3
-   * - phase 4: single thread merging intermediate results blocks. Time used: T4
-   *
-   * Then we have following equations:
-   * - singleThreadCpuTimeNs = T1 + T4
-   * - multipleThreadCpuTimeNs = T2 * N
-   * - totalWallClockTimeNs = T1 + T2 + T3 + T4 = singleThreadCpuTimeNs + T2 + T3
-   * - totalThreadCpuTimeNsWithoutSystemActivities = T1 + T2 * N + T4 = singleThreadCpuTimeNs + T2 * N
-   * - systemActivitiesTimeNs = T3 = (totalWallClockTimeNs - totalThreadCpuTimeNsWithoutSystemActivities) + T2 * (N - 1)
-   *
-   * Thus:
-   * totalThreadCpuTimeNsWithSystemActivities = totalThreadCpuTimeNsWithoutSystemActivities + systemActivitiesTimeNs
-   * = totalThreadCpuTimeNsWithoutSystemActivities + T3
-   * = totalThreadCpuTimeNsWithoutSystemActivities + (totalWallClockTimeNs -
-   * totalThreadCpuTimeNsWithoutSystemActivities) + T2 * (N - 1)
-   * = totalWallClockTimeNs + T2 * (N - 1)
-   * = totalWallClockTimeNs + (multipleThreadCpuTimeNs / N) * (N - 1)
-   */
-  public static long calTotalThreadCpuTimeNs(long totalWallClockTimeNs, long multipleThreadCpuTimeNs,
-      int numServerThreads) {
-    double perThreadCpuTimeNs = multipleThreadCpuTimeNs * 1.0 / numServerThreads;
-    return Math.round(totalWallClockTimeNs + perThreadCpuTimeNs * (numServerThreads - 1));
-  }
-
-  @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
   }
 
   private void prefetchAll() {
@@ -124,5 +126,15 @@ public class InstanceResponseOperator extends BaseOperator<InstanceResponseBlock
     for (int i = 0; i < _fetchContextSize; i++) {
       _indexSegments.get(i).release(_fetchContexts.get(i));
     }
+  }
+
+  @Override
+  public String toExplainString() {
+    return EXPLAIN_NAME;
+  }
+
+  @Override
+  public List<Operator> getChildOperators() {
+    return Collections.singletonList(_combineOperator);
   }
 }

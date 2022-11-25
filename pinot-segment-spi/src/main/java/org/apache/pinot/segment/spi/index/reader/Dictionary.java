@@ -20,6 +20,7 @@ package org.apache.pinot.segment.spi.index.reader;
 
 import it.unimi.dsi.fastutil.ints.IntSet;
 import java.io.Closeable;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.ByteArray;
@@ -55,6 +56,54 @@ public interface Dictionary extends Closeable {
   int indexOf(String stringValue);
 
   /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for INT dictionaries.
+   */
+  default int indexOf(int intValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for LONG dictionaries.
+   */
+  default int indexOf(long longValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for FLOAT dictionaries.
+   */
+  default int indexOf(float floatValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for DOUBLE dictionaries.
+   */
+  default int indexOf(double doubleValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for BIG_DECIMAL dictionaries.
+   */
+  default int indexOf(BigDecimal bigDecimalValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Returns the index of the value in the dictionary, or {@link #NULL_VALUE_INDEX} (-1) if the value does not exist.
+   * Must be implemented for BYTE_ARRAY dictionaries.
+   */
+  default int indexOf(ByteArray bytesValue) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
    * Returns the insertion index of the string representation of the value in the dictionary. This method follows the
    * same behavior as in {@link Arrays#binarySearch(Object[], Object)}. All sorted dictionaries should support this
    * method. This method is for the range predicate evaluation.
@@ -86,9 +135,10 @@ public interface Dictionary extends Closeable {
   Comparable getMaxVal();
 
   /**
-   * Returns an sorted array of all values in the dictionary. For type INT/LONG/FLOAT/DOUBLE, primitive type array will
-   * be returned; for type STRING, {@code String[]} will be returned; for type BYTES, {@code ByteArray[]} will be
-   * returned. This method is for the stats collection phase when sealing the consuming segment.
+   * Returns a sorted array of all values in the dictionary. For type INT/LONG/FLOAT/DOUBLE, primitive type array will
+   * be returned; for type BIG_DECIMAL, {@code BigDecimal[]} will be returned; for type STRING, {@code String[]} will be
+   * returned; for type BYTES, {@code ByteArray[]} will be returned.
+   * This method is for the stats collection phase when sealing the consuming segment.
    */
   Object getSortedValues();
 
@@ -102,6 +152,7 @@ public interface Dictionary extends Closeable {
    *   <li>LONG -> Long</li>
    *   <li>FLOAT -> Float</li>
    *   <li>DOUBLE -> Double</li>
+   *   <li>BIG_DECIMAL -> BigDecimal</li>
    *   <li>STRING -> String</li>
    *   <li>BYTES -> byte[]</li>
    * </ul>
@@ -116,6 +167,7 @@ public interface Dictionary extends Closeable {
    *   <li>LONG -> Long</li>
    *   <li>FLOAT -> Float</li>
    *   <li>DOUBLE -> Double</li>
+   *   <li>BIG_DECIMAL -> BigDecimal</li>
    *   <li>STRING -> String</li>
    *   <li>BYTES -> ByteArray</li>
    * </ul>
@@ -132,10 +184,12 @@ public interface Dictionary extends Closeable {
 
   double getDoubleValue(int dictId);
 
+  BigDecimal getBigDecimalValue(int dictId);
+
   String getStringValue(int dictId);
 
   /**
-   * NOTE: Should be overridden for STRING and BYTES dictionary.
+   * NOTE: Should be overridden for STRING, BIG_DECIMAL and BYTES dictionary.
    */
   default byte[] getBytesValue(int dictId) {
     throw new UnsupportedOperationException();
@@ -168,6 +222,12 @@ public interface Dictionary extends Closeable {
   default void readDoubleValues(int[] dictIds, int length, double[] outValues) {
     for (int i = 0; i < length; i++) {
       outValues[i] = getDoubleValue(dictIds[i]);
+    }
+  }
+
+  default void readBigDecimalValues(int[] dictIds, int length, BigDecimal[] outValues) {
+    for (int i = 0; i < length; i++) {
+      outValues[i] = getBigDecimalValue(dictIds[i]);
     }
   }
 

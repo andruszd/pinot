@@ -18,9 +18,9 @@
  */
 package org.apache.pinot.core.operator.filter.predicate;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.common.request.context.predicate.EqPredicate;
-import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.BooleanUtils;
@@ -60,21 +60,23 @@ public class EqualsPredicateEvaluatorFactory {
     String value = eqPredicate.getValue();
     switch (dataType) {
       case INT:
-        return new IntRawValueBasedEqPredicateEvaluator(Integer.parseInt(value));
+        return new IntRawValueBasedEqPredicateEvaluator(eqPredicate, Integer.parseInt(value));
       case LONG:
-        return new LongRawValueBasedEqPredicateEvaluator(Long.parseLong(value));
+        return new LongRawValueBasedEqPredicateEvaluator(eqPredicate, Long.parseLong(value));
       case FLOAT:
-        return new FloatRawValueBasedEqPredicateEvaluator(Float.parseFloat(value));
+        return new FloatRawValueBasedEqPredicateEvaluator(eqPredicate, Float.parseFloat(value));
       case DOUBLE:
-        return new DoubleRawValueBasedEqPredicateEvaluator(Double.parseDouble(value));
+        return new DoubleRawValueBasedEqPredicateEvaluator(eqPredicate, Double.parseDouble(value));
+      case BIG_DECIMAL:
+        return new BigDecimalRawValueBasedEqPredicateEvaluator(eqPredicate, new BigDecimal(value));
       case BOOLEAN:
-        return new IntRawValueBasedEqPredicateEvaluator(BooleanUtils.toInt(value));
+        return new IntRawValueBasedEqPredicateEvaluator(eqPredicate, BooleanUtils.toInt(value));
       case TIMESTAMP:
-        return new LongRawValueBasedEqPredicateEvaluator(TimestampUtils.toMillisSinceEpoch(value));
+        return new LongRawValueBasedEqPredicateEvaluator(eqPredicate, TimestampUtils.toMillisSinceEpoch(value));
       case STRING:
-        return new StringRawValueBasedEqPredicateEvaluator(value);
+        return new StringRawValueBasedEqPredicateEvaluator(eqPredicate, value);
       case BYTES:
-        return new BytesRawValueBasedEqPredicateEvaluator(BytesUtils.toBytes(value));
+        return new BytesRawValueBasedEqPredicateEvaluator(eqPredicate, BytesUtils.toBytes(value));
       default:
         throw new IllegalStateException("Unsupported data type: " + dataType);
     }
@@ -85,6 +87,7 @@ public class EqualsPredicateEvaluatorFactory {
     final int[] _matchingDictIds;
 
     DictionaryBasedEqPredicateEvaluator(EqPredicate eqPredicate, Dictionary dictionary, DataType dataType) {
+      super(eqPredicate);
       String predicateValue = PredicateUtils.getStoredValue(eqPredicate.getValue(), dataType);
       _matchingDictId = dictionary.indexOf(predicateValue);
       if (_matchingDictId >= 0) {
@@ -99,13 +102,26 @@ public class EqualsPredicateEvaluatorFactory {
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
     public boolean applySV(int dictId) {
       return _matchingDictId == dictId;
+    }
+
+    @Override
+    public int applySV(int limit, int[] docIds, int[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        int value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
     }
 
     @Override
@@ -117,13 +133,14 @@ public class EqualsPredicateEvaluatorFactory {
   private static final class IntRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final int _matchingValue;
 
-    IntRawValueBasedEqPredicateEvaluator(int matchingValue) {
+    IntRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, int matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
@@ -135,18 +152,32 @@ public class EqualsPredicateEvaluatorFactory {
     public boolean applySV(int value) {
       return _matchingValue == value;
     }
+
+    @Override
+    public int applySV(int limit, int[] docIds, int[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        int value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
+    }
   }
 
   private static final class LongRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final long _matchingValue;
 
-    LongRawValueBasedEqPredicateEvaluator(long matchingValue) {
+    LongRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, long matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
@@ -158,18 +189,32 @@ public class EqualsPredicateEvaluatorFactory {
     public boolean applySV(long value) {
       return (_matchingValue == value);
     }
+
+    @Override
+    public int applySV(int limit, int[] docIds, long[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        long value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
+    }
   }
 
   private static final class FloatRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final float _matchingValue;
 
-    FloatRawValueBasedEqPredicateEvaluator(float matchingValue) {
+    FloatRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, float matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
@@ -181,18 +226,32 @@ public class EqualsPredicateEvaluatorFactory {
     public boolean applySV(float value) {
       return _matchingValue == value;
     }
+
+    @Override
+    public int applySV(int limit, int[] docIds, float[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        float value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
+    }
   }
 
   private static final class DoubleRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final double _matchingValue;
 
-    DoubleRawValueBasedEqPredicateEvaluator(double matchingValue) {
+    DoubleRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, double matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
@@ -204,18 +263,56 @@ public class EqualsPredicateEvaluatorFactory {
     public boolean applySV(double value) {
       return _matchingValue == value;
     }
+
+    @Override
+    public int applySV(int limit, int[] docIds, double[] values) {
+      // reimplemented here to ensure applySV can be inlined
+      int matches = 0;
+      for (int i = 0; i < limit; i++) {
+        double value = values[i];
+        if (applySV(value)) {
+          docIds[matches++] = docIds[i];
+        }
+      }
+      return matches;
+    }
+  }
+
+  private static final class BigDecimalRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
+    final BigDecimal _matchingValue;
+
+    BigDecimalRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, BigDecimal matchingValue) {
+      super(eqPredicate);
+      _matchingValue = matchingValue;
+    }
+
+    @Override
+    public int getNumMatchingItems() {
+      return 1;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.BIG_DECIMAL;
+    }
+
+    @Override
+    public boolean applySV(BigDecimal value) {
+      return _matchingValue.compareTo(value) == 0;
+    }
   }
 
   private static final class StringRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final String _matchingValue;
 
-    StringRawValueBasedEqPredicateEvaluator(String matchingValue) {
+    StringRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, String matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override
@@ -232,13 +329,14 @@ public class EqualsPredicateEvaluatorFactory {
   private static final class BytesRawValueBasedEqPredicateEvaluator extends BaseRawValueBasedPredicateEvaluator {
     final byte[] _matchingValue;
 
-    BytesRawValueBasedEqPredicateEvaluator(byte[] matchingValue) {
+    BytesRawValueBasedEqPredicateEvaluator(EqPredicate eqPredicate, byte[] matchingValue) {
+      super(eqPredicate);
       _matchingValue = matchingValue;
     }
 
     @Override
-    public Predicate.Type getPredicateType() {
-      return Predicate.Type.EQ;
+    public int getNumMatchingItems() {
+      return 1;
     }
 
     @Override

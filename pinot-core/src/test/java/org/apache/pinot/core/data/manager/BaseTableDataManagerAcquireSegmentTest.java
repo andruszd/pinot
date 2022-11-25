@@ -18,10 +18,12 @@
  */
 package org.apache.pinot.core.data.manager;
 
+import com.google.common.collect.ImmutableList;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -29,17 +31,21 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.commons.configuration.MapConfiguration;
+import org.apache.commons.io.FileUtils;
 import org.apache.helix.HelixManager;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
-import org.apache.pinot.common.metrics.PinotMetricUtils;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.core.data.manager.offline.ImmutableSegmentDataManager;
 import org.apache.pinot.core.data.manager.offline.OfflineTableDataManager;
 import org.apache.pinot.segment.local.data.manager.SegmentDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManagerConfig;
+import org.apache.pinot.segment.local.data.manager.TableDataManagerParams;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.SegmentMetadata;
+import org.apache.pinot.spi.metrics.PinotMetricUtils;
+import org.apache.pinot.util.TestUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterSuite;
 import org.testng.annotations.BeforeMethod;
@@ -52,6 +58,8 @@ import static org.mockito.Mockito.*;
 public class BaseTableDataManagerAcquireSegmentTest {
   private static final String TABLE_NAME = "testTable";
   private static final String SEGMENT_PREFIX = "segment";
+  private static final int DELETED_SEGMENTS_CACHE_SIZE = 100;
+  private static final int DELETED_SEGMENTS_TTL_MINUTES = 2;
 
   // Set once for the suite
   private File _tmpDir;
@@ -79,7 +87,8 @@ public class BaseTableDataManagerAcquireSegmentTest {
   @BeforeSuite
   public void setUp()
       throws Exception {
-    _tmpDir = File.createTempFile("OfflineTableDataManagerTest", null);
+    _tmpDir = new File(FileUtils.getTempDirectory(), "OfflineTableDataManagerTest");
+    TestUtils.ensureDirectoriesExistAndEmpty(_tmpDir);
     _tmpDir.deleteOnExit();
 
     long seed = System.currentTimeMillis();
@@ -114,9 +123,13 @@ public class BaseTableDataManagerAcquireSegmentTest {
       config = mock(TableDataManagerConfig.class);
       when(config.getTableName()).thenReturn(TABLE_NAME);
       when(config.getDataDir()).thenReturn(_tmpDir.getAbsolutePath());
+      when(config.getAuthConfig()).thenReturn(new MapConfiguration(new HashMap<>()));
+      when(config.getTableDeletedSegmentsCacheSize()).thenReturn(DELETED_SEGMENTS_CACHE_SIZE);
+      when(config.getTableDeletedSegmentsCacheTtlMinutes()).thenReturn(DELETED_SEGMENTS_TTL_MINUTES);
     }
     tableDataManager.init(config, "dummyInstance", mock(ZkHelixPropertyStore.class),
-        new ServerMetrics(PinotMetricUtils.getPinotMetricsRegistry()), mock(HelixManager.class), null);
+        new ServerMetrics(PinotMetricUtils.getPinotMetricsRegistry()), mock(HelixManager.class), null,
+        new TableDataManagerParams(0, false, -1));
     tableDataManager.start();
     Field segsMapField = BaseTableDataManager.class.getDeclaredField("_segmentDataManagerMap");
     segsMapField.setAccessible(true);
@@ -165,6 +178,19 @@ public class BaseTableDataManagerAcquireSegmentTest {
     Assert.assertNull(segmentDataManager);
     List<SegmentDataManager> segmentDataManagers = tableDataManager.acquireAllSegments();
     Assert.assertEquals(segmentDataManagers.size(), 0);
+
+    // If a caller tries to acquire the deleted segment using acquireSegments, it will be returned in
+    // notAcquiredSegments. The isSegmentDeletedRecently method should return true.
+    List<String> notAcquiredSegments = new ArrayList<>();
+    tableDataManager.acquireSegments(ImmutableList.of(segmentName), notAcquiredSegments);
+    Assert.assertEquals(notAcquiredSegments.size(), 1);
+    Assert.assertTrue(tableDataManager.isSegmentDeletedRecently(segmentName));
+
+    // Adding and removing the segment again is fine. After adding the segment back, isSegmentDeletedRecently should
+    // return false.
+    tableDataManager.addSegment(immutableSegment);
+    Assert.assertFalse(tableDataManager.isSegmentDeletedRecently(segmentName));
+    tableDataManager.removeSegment(segmentName);
 
     // Removing the segment again is fine.
     tableDataManager.removeSegment(segmentName);
@@ -265,7 +291,6 @@ public class BaseTableDataManagerAcquireSegmentTest {
     try {
       Thread.sleep(runTimeSec * 1000);
     } catch (InterruptedException e) {
-
     }
     _closing = true;
 

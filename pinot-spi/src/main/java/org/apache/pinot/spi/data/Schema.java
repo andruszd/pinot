@@ -23,7 +23,6 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
@@ -38,11 +37,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.FieldSpec.FieldType;
 import org.apache.pinot.spi.utils.EqualityUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.spi.utils.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -92,7 +92,13 @@ public final class Schema implements Serializable {
     return JsonUtils.stringToObject(schemaString, Schema.class);
   }
 
-  public static Schema fromInputSteam(InputStream schemaInputStream)
+  public static Pair<Schema, Map<String, Object>> parseSchemaAndUnrecognizedPropsfromInputStream(
+      InputStream schemaInputStream)
+      throws IOException {
+    return JsonUtils.inputStreamToObjectAndUnrecognizedProperties(schemaInputStream, Schema.class);
+  }
+
+  public static Schema fromInputStream(InputStream schemaInputStream)
       throws IOException {
     return JsonUtils.inputStreamToObject(schemaInputStream, Schema.class);
   }
@@ -448,6 +454,7 @@ public final class Schema implements Serializable {
             case LONG:
             case FLOAT:
             case DOUBLE:
+            case BIG_DECIMAL:
             case BOOLEAN:
             case TIMESTAMP:
             case STRING:
@@ -465,6 +472,7 @@ public final class Schema implements Serializable {
             case LONG:
             case FLOAT:
             case DOUBLE:
+            case BIG_DECIMAL:
             case BYTES:
               break;
             default:
@@ -682,7 +690,10 @@ public final class Schema implements Serializable {
 
   /**
    * Check whether the current schema is backward compatible with oldSchema.
-   * Backward compatibility requires all columns and fieldSpec in oldSchema should be retained.
+   *
+   * Backward compatibility requires
+   * (1) all columns in oldSchema should be retained.
+   * (2) all column fieldSpecs should be backward compatible with the old ones.
    *
    * @param oldSchema old schema
    */
@@ -695,7 +706,8 @@ public final class Schema implements Serializable {
       }
       FieldSpec oldSchemaFieldSpec = entry.getValue();
       FieldSpec fieldSpec = getFieldSpecFor(oldSchemaColumnName);
-      if (!fieldSpec.equals(oldSchemaFieldSpec)) {
+
+      if (!fieldSpec.isBackwardCompatibleWith(oldSchemaFieldSpec)) {
         return false;
       }
     }
@@ -716,6 +728,15 @@ public final class Schema implements Serializable {
     return result;
   }
 
+  public Schema clone() {
+    Schema cloned = new SchemaBuilder()
+        .setSchemaName(getSchemaName())
+        .setPrimaryKeyColumns(getPrimaryKeyColumns())
+        .build();
+    getAllFieldSpecs().forEach(fieldSpec -> cloned.addField(fieldSpec));
+    return cloned;
+  }
+
   /**
    * Helper method that converts a {@link TimeFieldSpec} to {@link DateTimeFieldSpec}
    * 1) If timeFieldSpec contains only incoming granularity spec, directly convert it to a dateTimeFieldSpec
@@ -723,8 +744,7 @@ public final class Schema implements Serializable {
    * the dateTimeFieldSpec,
    *    and configure a transform function for the conversion from incoming
    */
-  @VisibleForTesting
-  static DateTimeFieldSpec convertToDateTimeFieldSpec(TimeFieldSpec timeFieldSpec) {
+  public static DateTimeFieldSpec convertToDateTimeFieldSpec(TimeFieldSpec timeFieldSpec) {
     DateTimeFieldSpec dateTimeFieldSpec = new DateTimeFieldSpec();
     TimeGranularitySpec incomingGranularitySpec = timeFieldSpec.getIncomingGranularitySpec();
     TimeGranularitySpec outgoingGranularitySpec = timeFieldSpec.getOutgoingGranularitySpec();
@@ -735,16 +755,26 @@ public final class Schema implements Serializable {
     int outgoingTimeSize = outgoingGranularitySpec.getTimeUnitSize();
     TimeUnit outgoingTimeUnit = outgoingGranularitySpec.getTimeType();
     String outgoingTimeFormat = outgoingGranularitySpec.getTimeFormat();
-    String[] split = StringUtils.split(outgoingTimeFormat, DateTimeFormatSpec.COLON_SEPARATOR, 2);
-    DateTimeFormatSpec formatSpec;
-    if (split[0].equals(DateTimeFieldSpec.TimeFormat.EPOCH.toString())) {
-      formatSpec = new DateTimeFormatSpec(outgoingTimeSize, outgoingTimeUnit.toString(), split[0]);
+    String[] split = StringUtil.split(outgoingTimeFormat, ':', 2);
+    String timeFormat;
+    if (split[0].equals(DateTimeFieldSpec.TimeFormat.EPOCH.name())) {
+      timeFormat = outgoingTimeSize + ":" + outgoingTimeUnit.name() + ":EPOCH";
     } else {
-      formatSpec = new DateTimeFormatSpec(outgoingTimeSize, outgoingTimeUnit.toString(), split[0], split[1]);
+      timeFormat = outgoingTimeSize + ":" + outgoingTimeUnit.name() + ":SIMPLE_DATE_FORMAT:" + split[1];
     }
-    dateTimeFieldSpec.setFormat(formatSpec.getFormat());
+    // TODO: Switch to new format after releasing 0.11.0
+//    if (split[0].equals(DateTimeFieldSpec.TimeFormat.EPOCH.name())) {
+//      timeFormat = "EPOCH|" + outgoingTimeUnit.name();
+//      if (outgoingTimeSize != 1) {
+//        timeFormat += "|" + outgoingTimeSize;
+//      }
+//      timeFormat = outgoingTimeSize + ":" + outgoingTimeUnit.name() + ":EPOCH";
+//    } else {
+//      timeFormat = "SIMPLE_DATE_FORMAT|" + split[1];
+//    }
+    dateTimeFieldSpec.setFormat(timeFormat);
     DateTimeGranularitySpec granularitySpec = new DateTimeGranularitySpec(outgoingTimeSize, outgoingTimeUnit);
-    dateTimeFieldSpec.setGranularity(granularitySpec.getGranularity());
+    dateTimeFieldSpec.setGranularity(outgoingTimeSize + ":" + outgoingTimeUnit.name());
 
     if (timeFieldSpec.getTransformFunction() != null) {
       dateTimeFieldSpec.setTransformFunction(timeFieldSpec.getTransformFunction());
@@ -754,8 +784,8 @@ public final class Schema implements Serializable {
       TimeUnit incomingTimeUnit = incomingGranularitySpec.getTimeType();
       String incomingTimeFormat = incomingGranularitySpec.getTimeFormat();
       Preconditions.checkState(
-          incomingTimeFormat.equals(DateTimeFieldSpec.TimeFormat.EPOCH.toString()) && outgoingTimeFormat
-              .equals(DateTimeFieldSpec.TimeFormat.EPOCH.toString()),
+          (incomingTimeFormat.equals(DateTimeFieldSpec.TimeFormat.EPOCH.toString()) || incomingTimeFormat.equals(
+              DateTimeFieldSpec.TimeFormat.TIMESTAMP.toString())) && outgoingTimeFormat.equals(incomingTimeFormat),
           "Conversion from incoming to outgoing is not supported for SIMPLE_DATE_FORMAT");
       String transformFunction =
           constructTransformFunctionString(incomingName, incomingTimeSize, incomingTimeUnit, outgoingTimeSize,

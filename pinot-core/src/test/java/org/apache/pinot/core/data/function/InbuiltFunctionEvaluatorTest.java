@@ -18,15 +18,18 @@
  */
 package org.apache.pinot.core.data.function;
 
+import java.lang.reflect.Method;
 import java.util.Collections;
 import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.segment.local.function.InbuiltFunctionEvaluator;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
 
 
 public class InbuiltFunctionEvaluatorTest {
@@ -52,6 +55,21 @@ public class InbuiltFunctionEvaluatorTest {
     GenericRow row = new GenericRow();
     for (int i = 0; i < 5; i++) {
       assertEquals(evaluator.evaluate(row), "testValue");
+    }
+  }
+
+  @Test
+  public void testScalarWrapperWithReservedKeywordExpression() {
+    String expression = "dateTrunc('MONTH', \"date\")";
+    InbuiltFunctionEvaluator evaluator = new InbuiltFunctionEvaluator(expression);
+    assertEquals(evaluator.getArguments(), Collections.singletonList("date"));
+    GenericRow row = new GenericRow();
+    for (int i = 1; i < 9; i++) {
+      DateTime dt = new DateTime(String.format("2020-0%d-15T12:00:00", i));
+      long millis = dt.getMillis();
+      DateTime truncDt = dt.withZone(DateTimeZone.UTC).withDayOfMonth(1).withHourOfDay(0).withMillisOfDay(0);
+      row.putValue("date", millis);
+      assertEquals(evaluator.evaluate(row), truncDt.getMillis());
     }
   }
 
@@ -111,7 +129,8 @@ public class InbuiltFunctionEvaluatorTest {
   public void testStateSharedBetweenRowsForExecution()
       throws Exception {
     MyFunc myFunc = new MyFunc();
-    FunctionRegistry.registerFunction(myFunc.getClass().getDeclaredMethod("appendToStringAndReturn", String.class));
+    Method method = myFunc.getClass().getDeclaredMethod("appendToStringAndReturn", String.class);
+    FunctionRegistry.registerFunction(method, false);
     String expression = "appendToStringAndReturn('test ')";
     InbuiltFunctionEvaluator evaluator = new InbuiltFunctionEvaluator(expression);
     assertTrue(evaluator.getArguments().isEmpty());
@@ -122,27 +141,26 @@ public class InbuiltFunctionEvaluatorTest {
   }
 
   @Test
-  public void testExceptionDuringInbuiltFunctionEvaluator()
-      throws Exception {
-    String expression = "fromDateTime(reverse('2020-01-01T00:00:00Z'), \"invalid_identifier\")";
-    InbuiltFunctionEvaluator evaluator = new InbuiltFunctionEvaluator(expression);
-    assertEquals(evaluator.getArguments().size(), 1);
-    GenericRow row = new GenericRow();
-    try {
-      evaluator.evaluate(row);
-      fail();
-    } catch (Exception e) {
-      // assert that exception contains the full function call signature
-      assertTrue(e.toString().contains("fromDateTime(reverse('2020-01-01T00:00:00Z'),invalid_identifier)"));
-      // assert that FunctionInvoker ISE is captured correctly.
-      assertTrue(e.getCause() instanceof IllegalStateException);
+  public void testNullReturnedByInbuiltFunctionEvaluatorThatCannotTakeNull() {
+    String[] expressions = {
+        "fromDateTime(\"NULL\", 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z''')",
+        "fromDateTime(\"invalid_identifier\", 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z''')",
+        "toDateTime(1648010797, \"invalid_identifier\", \"invalid_identifier\")",
+        "toDateTime(\"invalid_identifier\", \"invalid_identifier\", \"invalid_identifier\")",
+        "toDateTime(\"NULL\", \"invalid_identifier\", \"invalid_identifier\")",
+        "toDateTime(\"invalid_identifier\", \"NULL\", \"invalid_identifier\")"
+    };
+    for (String expression : expressions) {
+      InbuiltFunctionEvaluator evaluator = new InbuiltFunctionEvaluator(expression);
+      GenericRow row = new GenericRow();
+      assertNull(evaluator.evaluate(row));
     }
   }
 
-  private static class MyFunc {
+  public static class MyFunc {
     String _baseString = "";
 
-    String appendToStringAndReturn(String addedString) {
+    public String appendToStringAndReturn(String addedString) {
       _baseString += addedString;
       return _baseString;
     }

@@ -22,10 +22,11 @@ import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import it.unimi.dsi.fastutil.ints.IntSets;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.common.request.context.predicate.RangePredicate;
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.local.realtime.impl.forward.FixedByteSVMutableForwardIndex;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
@@ -179,6 +180,11 @@ public class DoubleOffHeapMutableDictionary extends BaseOffHeapMutableDictionary
     return getDictId(Double.valueOf(stringValue), null);
   }
 
+  @Override
+  public int indexOf(double doubleValue) {
+    return getDictId(doubleValue, null);
+  }
+
   public Double get(int dictId) {
     return getDoubleValue(dictId);
   }
@@ -201,6 +207,11 @@ public class DoubleOffHeapMutableDictionary extends BaseOffHeapMutableDictionary
   @Override
   public double getDoubleValue(int dictId) {
     return _dictIdToValue.getDouble(dictId);
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(getDoubleValue(dictId));
   }
 
   @Override

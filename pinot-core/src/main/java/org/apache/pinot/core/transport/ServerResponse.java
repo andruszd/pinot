@@ -18,8 +18,9 @@
  */
 package org.apache.pinot.core.transport;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.pinot.common.utils.DataTable;
+import org.apache.pinot.common.datatable.DataTable;
 
 
 /**
@@ -29,7 +30,7 @@ import org.apache.pinot.common.utils.DataTable;
 public class ServerResponse {
   private final long _startTimeMs;
   private volatile long _submitRequestTimeMs;
-  private volatile long _requestSentLatencyMs;
+  private volatile int _requestSentLatencyMs = -1;
   private volatile long _receiveDataTableTimeMs;
   private volatile DataTable _dataTable;
   private volatile int _responseSize;
@@ -39,6 +40,7 @@ public class ServerResponse {
     _startTimeMs = startTimeMs;
   }
 
+  @Nullable
   public DataTable getDataTable() {
     return _dataTable;
   }
@@ -52,19 +54,21 @@ public class ServerResponse {
   }
 
   public int getRequestSentDelayMs() {
-    if (_requestSentLatencyMs != 0) {
-      return (int) _requestSentLatencyMs;
-    } else {
-      return -1;
-    }
+    return _requestSentLatencyMs;
   }
 
   public int getResponseDelayMs() {
-    if (_receiveDataTableTimeMs != 0) {
-      return (int) (_receiveDataTableTimeMs - _submitRequestTimeMs);
-    } else {
+    if (_receiveDataTableTimeMs == 0) {
       return -1;
     }
+    if (_receiveDataTableTimeMs < _submitRequestTimeMs) {
+      // We currently mark a request as submitted after sending the request to the server. In highQPS-lowLatency
+      // usecases, there can be a race condition where the DataTable/response is received before the request is
+      // marked as submitted. Return 0 to avoid reporting negative values.
+      return 0;
+    }
+
+    return (int) (_receiveDataTableTimeMs - _submitRequestTimeMs);
   }
 
   public int getResponseSize() {
@@ -85,7 +89,7 @@ public class ServerResponse {
     _submitRequestTimeMs = System.currentTimeMillis();
   }
 
-  void markRequestSent(long requestSentLatencyMs) {
+  void markRequestSent(int requestSentLatencyMs) {
     _requestSentLatencyMs = requestSentLatencyMs;
   }
 

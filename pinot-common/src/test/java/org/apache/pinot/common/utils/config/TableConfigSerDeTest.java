@@ -21,7 +21,6 @@ package org.apache.pinot.common.utils.config;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.Lists;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -29,7 +28,9 @@ import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.tier.TierFactory;
 import org.apache.pinot.spi.config.table.CompletionConfig;
+import org.apache.pinot.spi.config.table.DedupConfig;
 import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.HashFunction;
 import org.apache.pinot.spi.config.table.QueryConfig;
 import org.apache.pinot.spi.config.table.QuotaConfig;
 import org.apache.pinot.spi.config.table.ReplicaGroupStrategyConfig;
@@ -47,6 +48,7 @@ import org.apache.pinot.spi.config.table.assignment.InstanceConstraintConfig;
 import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 import org.apache.pinot.spi.config.table.assignment.InstanceReplicaGroupPartitionConfig;
 import org.apache.pinot.spi.config.table.assignment.InstanceTagPoolConfig;
+import org.apache.pinot.spi.config.table.ingestion.AggregationConfig;
 import org.apache.pinot.spi.config.table.ingestion.BatchIngestionConfig;
 import org.apache.pinot.spi.config.table.ingestion.ComplexTypeConfig;
 import org.apache.pinot.spi.config.table.ingestion.FilterConfig;
@@ -189,7 +191,7 @@ public class TableConfigSerDeTest {
     }
     {
       // With query config
-      QueryConfig queryConfig = new QueryConfig(1000L);
+      QueryConfig queryConfig = new QueryConfig(1000L, true, true, Collections.singletonMap("func(a)", "b"));
       TableConfig tableConfig = tableConfigBuilder.setQueryConfig(queryConfig).build();
 
       checkQueryConfig(tableConfig);
@@ -208,7 +210,7 @@ public class TableConfigSerDeTest {
       InstanceAssignmentConfig instanceAssignmentConfig =
           new InstanceAssignmentConfig(new InstanceTagPoolConfig("tenant_OFFLINE", true, 3, null),
               new InstanceConstraintConfig(Arrays.asList("constraint1", "constraint2")),
-              new InstanceReplicaGroupPartitionConfig(true, 0, 3, 5, 0, 0));
+              new InstanceReplicaGroupPartitionConfig(true, 0, 3, 5, 0, 0, false));
       TableConfig tableConfig = tableConfigBuilder.setInstanceAssignmentConfigMap(
           Collections.singletonMap(InstancePartitionsType.OFFLINE, instanceAssignmentConfig)).build();
 
@@ -228,10 +230,8 @@ public class TableConfigSerDeTest {
       Map<String, String> properties = new HashMap<>();
       properties.put("foo", "bar");
       properties.put("foobar", "potato");
-      List<FieldConfig> fieldConfigList = Arrays.asList(
-          new FieldConfig("column1", FieldConfig.EncodingType.DICTIONARY, Lists.newArrayList(
-              FieldConfig.IndexType.INVERTED, FieldConfig.IndexType.RANGE), null,
-              properties),
+      List<FieldConfig> fieldConfigList = Arrays.asList(new FieldConfig("column1", FieldConfig.EncodingType.DICTIONARY,
+              Lists.newArrayList(FieldConfig.IndexType.INVERTED, FieldConfig.IndexType.RANGE), null, properties),
           new FieldConfig("column2", null, Collections.emptyList(), null, null),
           new FieldConfig("column3", FieldConfig.EncodingType.RAW, Collections.emptyList(),
               FieldConfig.CompressionCodec.SNAPPY, null));
@@ -250,14 +250,19 @@ public class TableConfigSerDeTest {
     }
     {
       // with upsert config
-      UpsertConfig upsertConfig =
-          new UpsertConfig(UpsertConfig.Mode.FULL, null, "comparison", UpsertConfig.HashFunction.NONE);
-
-      TableConfig tableConfig = tableConfigBuilder.setUpsertConfig(upsertConfig).build();
+      TableConfig tableConfig = tableConfigBuilder.setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL)).build();
 
       // Serialize then de-serialize
       checkTableConfigWithUpsertConfig(JsonUtils.stringToObject(tableConfig.toJsonString(), TableConfig.class));
       checkTableConfigWithUpsertConfig(TableConfigUtils.fromZNRecord(TableConfigUtils.toZNRecord(tableConfig)));
+    }
+    {
+      // with dedup config
+      DedupConfig dedupConfig = new DedupConfig(true, HashFunction.MD5);
+      TableConfig tableConfig = tableConfigBuilder.setDedupConfig(dedupConfig).build();
+      // Serialize then de-serialize
+      checkTableConfigWithDedupConfig(JsonUtils.stringToObject(tableConfig.toJsonString(), TableConfig.class));
+      checkTableConfigWithDedupConfig(TableConfigUtils.fromZNRecord(TableConfigUtils.toZNRecord(tableConfig)));
     }
     {
       // with SegmentsValidationAndRetentionConfig
@@ -269,23 +274,21 @@ public class TableConfigSerDeTest {
     }
     {
       // With ingestion config
-      List<TransformConfig> transformConfigs =
-          Lists.newArrayList(new TransformConfig("bar", "func(moo)"), new TransformConfig("zoo", "myfunc()"));
-      Map<String, String> batchConfigMap = new HashMap<>();
-      batchConfigMap.put("batchType", "s3");
-      Map<String, String> streamConfigMap = new HashMap<>();
-      streamConfigMap.put("streamType", "kafka");
-      List<Map<String, String>> streamConfigMaps = new ArrayList<>();
-      streamConfigMaps.add(streamConfigMap);
-      List<Map<String, String>> batchConfigMaps = new ArrayList<>();
-      batchConfigMaps.add(batchConfigMap);
-      List<String> fieldsToUnnest = Arrays.asList("c1, c2");
-      IngestionConfig ingestionConfig =
-          new IngestionConfig(new BatchIngestionConfig(batchConfigMaps, "APPEND", "HOURLY"),
-              new StreamIngestionConfig(streamConfigMaps), new FilterConfig("filterFunc(foo)"), transformConfigs,
-              new ComplexTypeConfig(fieldsToUnnest, ".", ComplexTypeConfig.CollectionNotUnnestedToJson.NON_PRIMITIVE));
-      TableConfig tableConfig = tableConfigBuilder.setIngestionConfig(ingestionConfig).build();
+      IngestionConfig ingestionConfig = new IngestionConfig();
+      ingestionConfig.setBatchIngestionConfig(
+          new BatchIngestionConfig(Collections.singletonList(Collections.singletonMap("batchType", "s3")), "APPEND",
+              "HOURLY"));
+      ingestionConfig.setStreamIngestionConfig(
+          new StreamIngestionConfig(Collections.singletonList(Collections.singletonMap("streamType", "kafka"))));
+      ingestionConfig.setFilterConfig(new FilterConfig("filterFunc(foo)"));
+      ingestionConfig.setTransformConfigs(
+          Arrays.asList(new TransformConfig("bar", "func(moo)"), new TransformConfig("zoo", "myfunc()")));
+      ingestionConfig.setComplexTypeConfig(new ComplexTypeConfig(Arrays.asList("c1", "c2"), ".",
+          ComplexTypeConfig.CollectionNotUnnestedToJson.NON_PRIMITIVE, Collections.emptyMap()));
+      ingestionConfig.setAggregationConfigs(
+          Arrays.asList(new AggregationConfig("SUM__bar", "SUM(bar)"), new AggregationConfig("MIN_foo", "MIN(foo)")));
 
+      TableConfig tableConfig = tableConfigBuilder.setIngestionConfig(ingestionConfig).build();
       checkIngestionConfig(tableConfig);
 
       // Serialize then de-serialize
@@ -300,10 +303,12 @@ public class TableConfigSerDeTest {
     {
       // With tier config
       List<TierConfig> tierConfigList = Lists.newArrayList(
-          new TierConfig("tierA", TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "10d", TierFactory.PINOT_SERVER_STORAGE_TYPE,
-              "tierA_tag_OFFLINE"),
-          new TierConfig("tierB", TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "30d", TierFactory.PINOT_SERVER_STORAGE_TYPE,
-              "tierB_tag_OFFLINE"));
+          new TierConfig("tierA", TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "10d", null,
+              TierFactory.PINOT_SERVER_STORAGE_TYPE, "tierA_tag_OFFLINE", null, null),
+          new TierConfig("tierB", TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "30d", null,
+              TierFactory.PINOT_SERVER_STORAGE_TYPE, "tierB_tag_OFFLINE", null, null),
+          new TierConfig("tier0", TierFactory.FIXED_SEGMENT_SELECTOR_TYPE, null, Lists.newArrayList("seg0"),
+              TierFactory.PINOT_SERVER_STORAGE_TYPE, "tierB_tag_OFFLINE", null, null));
       TableConfig tableConfig = tableConfigBuilder.setTierConfigList(tierConfigList).build();
 
       checkTierConfigList(tableConfig);
@@ -339,26 +344,11 @@ public class TableConfigSerDeTest {
       assertEquals(tunerConfigToCompare.getName(), name);
       assertEquals(tunerConfigToCompare.getTunerProperties(), props);
     }
-    {
-      // disable handling null value in time column
-      TableConfig tableConfig = tableConfigBuilder.setTimeColumnName("timeColumn").build();
-      checkNullTimeValueHandling(JsonUtils.stringToObject(tableConfig.toJsonString(), TableConfig.class), false);
-      checkNullTimeValueHandling(TableConfigUtils.fromZNRecord(TableConfigUtils.toZNRecord(tableConfig)), false);
-
-      // enable handling null value in time column
-      tableConfig = tableConfigBuilder.setAllowNullTimeValue(true).setTimeColumnName("timeColumn").build();
-      checkNullTimeValueHandling(JsonUtils.stringToObject(tableConfig.toJsonString(), TableConfig.class), true);
-      checkNullTimeValueHandling(TableConfigUtils.fromZNRecord(TableConfigUtils.toZNRecord(tableConfig)), true);
-    }
   }
 
   private void checkSegmentsValidationAndRetentionConfig(TableConfig tableConfig) {
     // TODO validate other fields of SegmentsValidationAndRetentionConfig.
     assertEquals(tableConfig.getValidationConfig().getPeerSegmentDownloadScheme(), CommonConstants.HTTP_PROTOCOL);
-  }
-
-  private void checkNullTimeValueHandling(TableConfig tableConfig, boolean expected) {
-    assertEquals(tableConfig.getValidationConfig().isAllowNullTimeValue(), expected);
   }
 
   private void checkDefaultTableConfig(TableConfig tableConfig) {
@@ -375,6 +365,7 @@ public class TableConfigSerDeTest {
     assertNull(tableConfig.getRoutingConfig());
     assertNull(tableConfig.getQueryConfig());
     assertNull(tableConfig.getInstanceAssignmentConfigMap());
+    assertNull(tableConfig.getSegmentAssignmentConfigMap());
     assertNull(tableConfig.getFieldConfigList());
 
     // Serialize
@@ -390,6 +381,7 @@ public class TableConfigSerDeTest {
     assertFalse(tableConfigJson.has(TableConfig.ROUTING_CONFIG_KEY));
     assertFalse(tableConfigJson.has(TableConfig.QUERY_CONFIG_KEY));
     assertFalse(tableConfigJson.has(TableConfig.INSTANCE_ASSIGNMENT_CONFIG_MAP_KEY));
+    assertFalse(tableConfigJson.has(TableConfig.SEGMENT_ASSIGNMENT_CONFIG_MAP_KEY));
     assertFalse(tableConfigJson.has(TableConfig.FIELD_CONFIG_LIST_KEY));
   }
 
@@ -445,6 +437,8 @@ public class TableConfigSerDeTest {
     QueryConfig queryConfig = tableConfig.getQueryConfig();
     assertNotNull(queryConfig);
     assertEquals(queryConfig.getTimeoutMs(), Long.valueOf(1000L));
+    assertEquals(queryConfig.getDisableGroovy(), Boolean.TRUE);
+    assertEquals(queryConfig.getExpressionOverrideMap(), Collections.singletonMap("func(a)", "b"));
   }
 
   private void checkIngestionConfig(TableConfig tableConfig) {
@@ -474,7 +468,7 @@ public class TableConfigSerDeTest {
   private void checkTierConfigList(TableConfig tableConfig) {
     List<TierConfig> tierConfigsList = tableConfig.getTierConfigsList();
     assertNotNull(tierConfigsList);
-    assertEquals(tierConfigsList.size(), 2);
+    assertEquals(tierConfigsList.size(), 3);
     assertEquals(tierConfigsList.get(0).getName(), "tierA");
     assertEquals(tierConfigsList.get(0).getSegmentSelectorType(), TierFactory.TIME_SEGMENT_SELECTOR_TYPE);
     assertEquals(tierConfigsList.get(0).getSegmentAge(), "10d");
@@ -485,6 +479,12 @@ public class TableConfigSerDeTest {
     assertEquals(tierConfigsList.get(1).getSegmentAge(), "30d");
     assertEquals(tierConfigsList.get(1).getStorageType(), TierFactory.PINOT_SERVER_STORAGE_TYPE);
     assertEquals(tierConfigsList.get(1).getServerTag(), "tierB_tag_OFFLINE");
+    assertEquals(tierConfigsList.get(2).getName(), "tier0");
+    assertEquals(tierConfigsList.get(2).getSegmentSelectorType(), TierFactory.FIXED_SEGMENT_SELECTOR_TYPE);
+    assertNull(tierConfigsList.get(2).getSegmentAge());
+    assertEquals(tierConfigsList.get(2).getSegmentList(), Lists.newArrayList("seg0"));
+    assertEquals(tierConfigsList.get(2).getStorageType(), TierFactory.PINOT_SERVER_STORAGE_TYPE);
+    assertEquals(tierConfigsList.get(2).getServerTag(), "tierB_tag_OFFLINE");
   }
 
   private void checkInstanceAssignmentConfig(TableConfig tableConfig) {
@@ -550,5 +550,13 @@ public class TableConfigSerDeTest {
     assertNotNull(upsertConfig);
 
     assertEquals(upsertConfig.getMode(), UpsertConfig.Mode.FULL);
+  }
+
+  private void checkTableConfigWithDedupConfig(TableConfig tableConfig) {
+    DedupConfig dedupConfig = tableConfig.getDedupConfig();
+    assertNotNull(dedupConfig);
+
+    assertTrue(dedupConfig.isDedupEnabled());
+    assertEquals(dedupConfig.getHashFunction(), HashFunction.MD5);
   }
 }

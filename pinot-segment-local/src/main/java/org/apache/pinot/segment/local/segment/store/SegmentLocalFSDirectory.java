@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.annotation.Nullable;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
@@ -36,6 +37,7 @@ import org.apache.pinot.segment.spi.store.ColumnIndexDirectory;
 import org.apache.pinot.segment.spi.store.ColumnIndexType;
 import org.apache.pinot.segment.spi.store.SegmentDirectory;
 import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,10 +60,19 @@ public class SegmentLocalFSDirectory extends SegmentDirectory {
   private final File _indexDir;
   private final File _segmentDirectory;
   private final SegmentLock _segmentLock;
-  private SegmentMetadataImpl _segmentMetadata;
   private final ReadMode _readMode;
-
+  private SegmentMetadataImpl _segmentMetadata;
   private ColumnIndexDirectory _columnIndexDirectory;
+  private String _tier;
+
+  // Create an empty SegmentLocalFSDirectory object mainly used to
+  // prepare env for subsequent processing on the segment.
+  public SegmentLocalFSDirectory(File directory) {
+    _indexDir = directory;
+    _segmentDirectory = null;
+    _segmentLock = new SegmentLock();
+    _readMode = null;
+  }
 
   public SegmentLocalFSDirectory(File directory, ReadMode readMode)
       throws IOException {
@@ -92,6 +103,31 @@ public class SegmentLocalFSDirectory extends SegmentDirectory {
   @Override
   public URI getIndexDir() {
     return _indexDir.toURI();
+  }
+
+  @Override
+  public void copyTo(File dest)
+      throws Exception {
+    File src = _indexDir;
+    if (!src.exists()) {
+      // If the original one doesn't exist, then try the backup directory.
+      File parentDir = _indexDir.getParentFile();
+      src = new File(parentDir, _indexDir.getName() + CommonConstants.Segment.SEGMENT_BACKUP_DIR_SUFFIX);
+    }
+    if (src.exists() && !src.equals(dest)) {
+      FileUtils.copyDirectory(src, dest);
+    }
+  }
+
+  @Nullable
+  @Override
+  public String getTier() {
+    return _tier;
+  }
+
+  @Override
+  public void setTier(@Nullable String tier) {
+    _tier = tier;
   }
 
   @Override

@@ -51,7 +51,7 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
   @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "host name for controller.")
   private String _controllerHost;
 
-  @CommandLine.Option(names = {"-controllerPort"}, required = false, 
+  @CommandLine.Option(names = {"-controllerPort"}, required = false,
       description = "Port number to start the controller at.")
   private String _controllerPort = DEFAULT_CONTROLLER_PORT;
 
@@ -78,6 +78,42 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
   @Override
   public boolean getHelp() {
     return _help;
+  }
+
+  public ControllerConf.ControllerMode getControllerMode() {
+    return _controllerMode;
+  }
+
+  public String getControllerHost() {
+    return _controllerHost;
+  }
+
+  public String getControllerPort() {
+    return _controllerPort;
+  }
+
+  public String getDataDir() {
+    return _dataDir;
+  }
+
+  public String getZkAddress() {
+    return _zkAddress;
+  }
+
+  public String getClusterName() {
+    return _clusterName;
+  }
+
+  public String getConfigFileName() {
+    return _configFileName;
+  }
+
+  public boolean isTenantIsolation() {
+    return _tenantIsolation;
+  }
+
+  public Map<String, Object> getConfigOverrides() {
+    return _configOverrides;
   }
 
   public StartControllerCommand setControllerPort(String controllerPort) {
@@ -132,7 +168,6 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -149,27 +184,30 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
       StartServiceManagerCommand startServiceManagerCommand =
           new StartServiceManagerCommand().setZkAddress(_zkAddress).setClusterName(_clusterName).setPort(-1)
               .setBootstrapServices(new String[0]).addBootstrapService(ServiceRole.CONTROLLER, controllerConf);
-      startServiceManagerCommand.execute();
-      String pidFile = ".pinotAdminController-" + System.currentTimeMillis() + ".pid";
-      savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
-      return true;
+      if (startServiceManagerCommand.execute()) {
+        String pidFile = ".pinotAdminController-" + System.currentTimeMillis() + ".pid";
+        savePID(System.getProperty("java.io.tmpdir") + File.separator + pidFile);
+        return true;
+      }
     } catch (Exception e) {
       LOGGER.error("Caught exception while starting controller, exiting.", e);
-      System.exit(-1);
-      return false;
     }
+    System.exit(-1);
+    return false;
   }
 
-  private Map<String, Object> getControllerConf()
+  protected Map<String, Object> getControllerConf()
       throws ConfigurationException, SocketException, UnknownHostException {
     Map<String, Object> properties = new HashMap<>();
     if (_configFileName != null) {
       properties.putAll(PinotConfigUtils.generateControllerConf(_configFileName));
+      ControllerConf conf = new ControllerConf(properties);
+
       // Override the zkAddress and clusterName to ensure ServiceManager is connecting to the right Zookeeper and
       // Cluster.
       // Configs existence is already verified.
-      _zkAddress = properties.get(ControllerConf.ZK_STR).toString();
-      _clusterName = properties.get(ControllerConf.HELIX_CLUSTER_NAME).toString();
+      _zkAddress = conf.getZkStr();
+      _clusterName = conf.getHelixClusterName();
     } else {
       if (_controllerHost == null) {
         _controllerHost = NetUtils.getHostAddress();

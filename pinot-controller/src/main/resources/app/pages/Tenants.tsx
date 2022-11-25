@@ -64,8 +64,9 @@ const TenantPage = ({ match }: RouteComponentProps<Props>) => {
     const brokersData = await PinotMethodUtils.getBrokerOfTenant(tenantName);
     const serversData = await PinotMethodUtils.getServerOfTenant(tenantName);
     setTableData(tenantData);
-    setBrokerData(brokersData || []);
-    let separatedServers = Array.isArray(serversData) ? serversData.map((elm) => [elm]) : [];
+    const separatedBrokers = Array.isArray(brokersData) ? brokersData.map((elm) => [elm]) : [];
+    setBrokerData(separatedBrokers || []);
+    const separatedServers = Array.isArray(serversData) ? serversData.map((elm) => [elm]) : [];
     setServerData(separatedServers || []);
     setFetching(false);
   };
@@ -107,7 +108,6 @@ const TenantPage = ({ match }: RouteComponentProps<Props>) => {
         title={tenantName}
         data={tableData}
         tooltipData={TableTooltipData}
-        isPagination
         addLinks
         baseURL={`/tenants/${tenantName}/table/`}
         showSearchBox={true}
@@ -119,9 +119,8 @@ const TenantPage = ({ match }: RouteComponentProps<Props>) => {
             title="Brokers"
             data={{
               columns: ['Instance Name'],
-              records: brokerData.length > 0 ? [brokerData] : []
+              records: brokerData.length > 0 ? brokerData : []
             }}
-            isPagination
             addLinks
             baseURL="/instance/"
             showSearchBox={true}
@@ -135,7 +134,6 @@ const TenantPage = ({ match }: RouteComponentProps<Props>) => {
               columns: ['Instance Name'],
               records: serverData.length > 0 ? serverData : []
             }}
-            isPagination
             addLinks
             baseURL="/instance/"
             showSearchBox={true}

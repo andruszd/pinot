@@ -26,9 +26,8 @@ import org.apache.pinot.common.function.DateTimeUtils;
 import org.apache.pinot.common.function.TimeZoneKey;
 import org.apache.pinot.spi.annotations.ScalarFunction;
 import org.joda.time.DateTime;
-import org.joda.time.DateTimeField;
 import org.joda.time.DateTimeZone;
-
+import org.joda.time.chrono.ISOChronology;
 
 /**
  * Inbuilt date time related transform functions
@@ -273,6 +272,14 @@ public class DateTimeFunctions {
   }
 
   /**
+   * Converts DateTime string represented by pattern to epoch millis
+   */
+  @ScalarFunction
+  public static long fromDateTime(String dateTimeString, String pattern, String timeZoneId) {
+    return DateTimePatternHandler.parseDateTimeStringToEpochMillis(dateTimeString, pattern, timeZoneId);
+  }
+
+  /**
    * Round the given time value to nearest multiple
    * @return the original value but rounded to the nearest multiple of @param roundToNearest
    */
@@ -348,7 +355,7 @@ public class DateTimeFunctions {
   /**
    * Returns the year of the ISO week from the given epoch millis in UTC timezone.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"yearOfWeek", "year_of_week", "yow"})
   public static int yearOfWeek(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getWeekyear();
   }
@@ -356,25 +363,9 @@ public class DateTimeFunctions {
   /**
    * Returns the year of the ISO week from the given epoch millis and timezone id.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"yearOfWeek", "year_of_week", "yow"})
   public static int yearOfWeek(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getWeekyear();
-  }
-
-  /**
-   * An alias for yearOfWeek().
-   */
-  @ScalarFunction
-  public static int yow(long millis) {
-    return yearOfWeek(millis);
-  }
-
-  /**
-   * An alias for yearOfWeek().
-   */
-  @ScalarFunction
-  public static int yow(long millis, String timezoneId) {
-    return yearOfWeek(millis, timezoneId);
   }
 
   /**
@@ -382,7 +373,7 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static int quarter(long millis) {
-    return (month(millis) - 1) / 3 + 1;
+    return (monthOfYear(millis) - 1) / 3 + 1;
   }
 
   /**
@@ -390,61 +381,45 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static int quarter(long millis, String timezoneId) {
-    return (month(millis, timezoneId) - 1) / 3 + 1;
+    return (monthOfYear(millis, timezoneId) - 1) / 3 + 1;
   }
 
   /**
    * Returns the month of the year from the given epoch millis in UTC timezone. The value ranges from 1 to 12.
    */
-  @ScalarFunction
-  public static int month(long millis) {
+  @ScalarFunction(names = {"month", "month_of_year", "monthOfYear"})
+  public static int monthOfYear(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getMonthOfYear();
   }
 
   /**
    * Returns the month of the year from the given epoch millis and timezone id. The value ranges from 1 to 12.
    */
-  @ScalarFunction
-  public static int month(long millis, String timezoneId) {
+  @ScalarFunction(names = {"month", "month_of_year", "monthOfYear"})
+  public static int monthOfYear(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getMonthOfYear();
   }
 
   /**
    * Returns the ISO week of the year from the given epoch millis in UTC timezone.The value ranges from 1 to 53.
    */
-  @ScalarFunction
-  public static int week(long millis) {
+  @ScalarFunction(names = {"weekOfYear", "week_of_year", "week"})
+  public static int weekOfYear(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getWeekOfWeekyear();
   }
 
   /**
    * Returns the ISO week of the year from the given epoch millis and timezone id. The value ranges from 1 to 53.
    */
-  @ScalarFunction
-  public static int week(long millis, String timezoneId) {
-    return new DateTime(millis, DateTimeZone.forID(timezoneId)).getWeekOfWeekyear();
-  }
-
-  /**
-   * An alias for week().
-   */
-  @ScalarFunction
-  public static int weekOfYear(long millis) {
-    return week(millis);
-  }
-
-  /**
-   * An alias for week().
-   */
-  @ScalarFunction
+  @ScalarFunction(names = {"weekOfYear", "week_of_year", "week"})
   public static int weekOfYear(long millis, String timezoneId) {
-    return week(millis, timezoneId);
+    return new DateTime(millis, DateTimeZone.forID(timezoneId)).getWeekOfWeekyear();
   }
 
   /**
    * Returns the day of the year from the given epoch millis in UTC timezone. The value ranges from 1 to 366.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"dayOfYear", "day_of_year", "doy"})
   public static int dayOfYear(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfYear();
   }
@@ -452,64 +427,32 @@ public class DateTimeFunctions {
   /**
    * Returns the day of the year from the given epoch millis and timezone id. The value ranges from 1 to 366.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"dayOfYear", "day_of_year", "doy"})
   public static int dayOfYear(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfYear();
   }
 
   /**
-   * An alias for dayOfYear().
-   */
-  @ScalarFunction
-  public static int doy(long millis) {
-    return dayOfYear(millis);
-  }
-
-  /**
-   * An alias for dayOfYear().
-   */
-  @ScalarFunction
-  public static int doy(long millis, String timezoneId) {
-    return dayOfYear(millis, timezoneId);
-  }
-
-  /**
    * Returns the day of the month from the given epoch millis in UTC timezone. The value ranges from 1 to 31.
    */
-  @ScalarFunction
-  public static int day(long millis) {
+  @ScalarFunction(names = {"day", "dayOfMonth", "day_of_month"})
+  public static int dayOfMonth(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfMonth();
   }
 
   /**
    * Returns the day of the month from the given epoch millis and timezone id. The value ranges from 1 to 31.
    */
-  @ScalarFunction
-  public static int day(long millis, String timezoneId) {
-    return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfMonth();
-  }
-
-  /**
-   * An alias for day().
-   */
-  @ScalarFunction
-  public static int dayOfMonth(long millis) {
-    return day(millis);
-  }
-
-  /**
-   * An alias for day().
-   */
-  @ScalarFunction
+  @ScalarFunction(names = {"day", "dayOfMonth", "day_of_month"})
   public static int dayOfMonth(long millis, String timezoneId) {
-    return day(millis, timezoneId);
+    return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfMonth();
   }
 
   /**
    * Returns the day of the week from the given epoch millis in UTC timezone. The value ranges from 1 (Monday) to 7
    * (Sunday).
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"dayOfWeek", "day_of_week", "dow"})
   public static int dayOfWeek(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfWeek();
   }
@@ -518,25 +461,9 @@ public class DateTimeFunctions {
    * Returns the day of the week from the given epoch millis and timezone id. The value ranges from 1 (Monday) to 7
    * (Sunday).
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"dayOfWeek", "day_of_week", "dow"})
   public static int dayOfWeek(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfWeek();
-  }
-
-  /**
-   * An alias for dayOfWeek().
-   */
-  @ScalarFunction
-  public static int dow(long millis) {
-    return dayOfWeek(millis);
-  }
-
-  /**
-   * An alias for dayOfWeek().
-   */
-  @ScalarFunction
-  public static int dow(long millis, String timezoneId) {
-    return dayOfWeek(millis, timezoneId);
   }
 
   /**
@@ -604,18 +531,20 @@ public class DateTimeFunctions {
   }
 
   /**
-   * The sql compatible date_trunc function for epoch time
+   * The sql compatible date_trunc function for epoch time.
+   *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
    * @return truncated timeValue in TimeUnit.MILLISECONDS
    */
   @ScalarFunction
-  public long dateTrunc(String unit, long timeValue) {
-    return dateTrunc(unit, timeValue, TimeUnit.MILLISECONDS.name());
+  public static long dateTrunc(String unit, long timeValue) {
+    return dateTrunc(unit, timeValue, TimeUnit.MILLISECONDS, ISOChronology.getInstanceUTC(), TimeUnit.MILLISECONDS);
   }
 
   /**
    * The sql compatible date_trunc function for epoch time.
+   *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
    * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
@@ -623,12 +552,13 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr) {
-    return dateTrunc(unit, timeValue, inputTimeUnitStr, TimeZoneKey.UTC_KEY.getId(), inputTimeUnitStr);
+    TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitStr);
+    return dateTrunc(unit, timeValue, inputTimeUnit, ISOChronology.getInstanceUTC(), inputTimeUnit);
   }
 
   /**
-   *
    * The sql compatible date_trunc function for epoch time.
+   *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
    * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
@@ -637,12 +567,14 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr, String timeZone) {
-    return dateTrunc(unit, timeValue, inputTimeUnitStr, timeZone, inputTimeUnitStr);
+    TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitStr);
+    return dateTrunc(unit, timeValue, inputTimeUnit, DateTimeUtils.getChronology(TimeZoneKey.getTimeZoneKey(timeZone)),
+        inputTimeUnit);
   }
 
   /**
-   *
    * The sql compatible date_trunc function for epoch time.
+   *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
    * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
@@ -654,12 +586,42 @@ public class DateTimeFunctions {
   @ScalarFunction
   public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr, String timeZone,
       String outputTimeUnitStr) {
-    TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitStr);
-    TimeUnit outputTimeUnit = TimeUnit.valueOf(outputTimeUnitStr);
-    TimeZoneKey timeZoneKey = TimeZoneKey.getTimeZoneKey(timeZone);
+    return dateTrunc(unit, timeValue, TimeUnit.valueOf(inputTimeUnitStr),
+        DateTimeUtils.getChronology(TimeZoneKey.getTimeZoneKey(timeZone)), TimeUnit.valueOf(outputTimeUnitStr));
+  }
 
-    DateTimeField dateTimeField = DateTimeUtils.getTimestampField(DateTimeUtils.getChronology(timeZoneKey), unit);
-    return outputTimeUnit.convert(dateTimeField.roundFloor(TimeUnit.MILLISECONDS.convert(timeValue, inputTimeUnit)),
-        TimeUnit.MILLISECONDS);
+  private static long dateTrunc(String unit, long timeValue, TimeUnit inputTimeUnit, ISOChronology chronology,
+      TimeUnit outputTimeUnit) {
+    return outputTimeUnit.convert(DateTimeUtils.getTimestampField(chronology, unit)
+        .roundFloor(TimeUnit.MILLISECONDS.convert(timeValue, inputTimeUnit)), TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Add a time period to the provided timestamp.
+   * e.g. timestampAdd('days', 10, NOW()) will add 10 days to the current timestamp and return the value
+   * @param unit the timeunit of the period to add. e.g. milliseconds, seconds, days, year
+   * @param interval value of the period to add.
+   * @param timestamp
+   * @return
+   */
+  @ScalarFunction(names = {"timestampAdd", "dateAdd"})
+  public static long timestampAdd(String unit, long interval, long timestamp) {
+    ISOChronology chronology = ISOChronology.getInstanceUTC();
+    long millis = DateTimeUtils.getTimestampField(chronology, unit).add(timestamp, interval);
+    return millis;
+  }
+
+  /**
+   * Get difference between two timestamps and return the result in the specified timeunit.
+   * e.g. timestampDiff('days', ago('10D'), ago('2D')) will return 8 i.e. 8 days
+   * @param unit
+   * @param timestamp1
+   * @param timestamp2
+   * @return
+   */
+  @ScalarFunction(names = {"timestampDiff", "dateDiff"})
+  public static long timestampDiff(String unit, long timestamp1, long timestamp2) {
+    ISOChronology chronology = ISOChronology.getInstanceUTC();
+    return DateTimeUtils.getTimestampField(chronology, unit).getDifferenceAsLong(timestamp2, timestamp1);
   }
 }

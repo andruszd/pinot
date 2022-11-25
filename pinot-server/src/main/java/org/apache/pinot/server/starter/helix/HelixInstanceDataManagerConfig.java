@@ -18,10 +18,10 @@
  */
 package org.apache.pinot.server.starter.helix;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Optional;
 import org.apache.commons.configuration.ConfigurationException;
+import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.segment.spi.loader.SegmentDirectoryLoaderRegistry;
 import org.apache.pinot.spi.config.instance.InstanceDataManagerConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants.Server;
@@ -63,13 +63,8 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
   public static final String SEGMENT_FORMAT_VERSION = "segment.format.version";
   // Key of whether to enable reloading consuming segments
   public static final String INSTANCE_RELOAD_CONSUMING_SEGMENT = "reload.consumingSegment";
-  // Key of the auth token
-  public static final String AUTH_TOKEN = "auth.token";
-  // Tier properties
-  public static final String TIER_BACKEND = "tier.backend";
-  public static final String DEFAULT_TIER_BACKEND = "local";
-  // Prefix for tier config
-  public static final String TIER_CONFIGS_PREFIX = "tier";
+  // Key of segment directory loader
+  public static final String SEGMENT_DIRECTORY_LOADER = "segment.directory.loader";
 
   // Key of how many parallel realtime segments can be built.
   // A value of <= 0 indicates unlimited.
@@ -77,6 +72,25 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
   // response times to suffer.
   private static final String MAX_PARALLEL_SEGMENT_BUILDS = "realtime.max.parallel.segment.builds";
   private static final int DEFAULT_MAX_PARALLEL_SEGMENT_BUILDS = 4;
+
+  // Key of how many parallel segment downloads can be made per table.
+  // A value of <= 0 indicates unlimited.
+  // Unlimited parallel downloads can make Pinot controllers receive high burst of download requests,
+  // causing controllers unavailable for that period of time.
+  private static final String MAX_PARALLEL_SEGMENT_DOWNLOADS = "table.level.max.parallel.segment.downloads";
+  private static final int DEFAULT_MAX_PARALLEL_SEGMENT_DOWNLOADS = -1;
+
+  // Key of server segment download rate limit
+  // limit the rate to write download-untar stream to disk, in bytes
+  // -1 for no disk write limit, 0 for limit the writing to min(untar, download) rate
+  private static final String STREAM_SEGMENT_DOWNLOAD_UNTAR_RATE_LIMIT
+      = "segment.stream.download.untar.rate.limit.bytes.per.sec";
+  private static final long DEFAULT_STREAM_SEGMENT_DOWNLOAD_UNTAR_RATE_LIMIT
+      = TarGzCompressionUtils.NO_DISK_WRITE_RATE_LIMIT;
+
+  // Key of whether to use streamed server segment download-untar
+  private static final String ENABLE_STREAM_SEGMENT_DOWNLOAD_UNTAR = "segment.stream.download.untar";
+  private static final boolean DEFAULT_ENABLE_STREAM_SEGMENT_DOWNLOAD_UNTAR = false;
 
   // Key of whether to enable split commit
   private static final String ENABLE_SPLIT_COMMIT = "enable.split.commit";
@@ -107,8 +121,14 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
   // Size of cache that holds errors.
   private static final String ERROR_CACHE_SIZE = "error.cache.size";
 
+  private static final String DELETED_SEGMENTS_CACHE_SIZE = "table.deleted.segments.cache.size";
+  private static final String DELETED_SEGMENTS_CACHE_TTL_MINUTES = "table.deleted.segments.cache.ttl.minutes";
+  private static final String PEER_DOWNLOAD_SCHEME = "peer.download.scheme";
+
   private final static String[] REQUIRED_KEYS = {INSTANCE_ID, INSTANCE_DATA_DIR, READ_MODE};
   private static final long DEFAULT_ERROR_CACHE_SIZE = 100L;
+  private static final int DEFAULT_DELETED_SEGMENTS_CACHE_SIZE = 10_000;
+  private static final int DEFAULT_DELETED_SEGMENTS_CACHE_TTL_MINUTES = 2;
   private PinotConfiguration _instanceDataManagerConfiguration = null;
 
   public HelixInstanceDataManagerConfig(PinotConfiguration serverConfig)
@@ -178,7 +198,7 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
 
   @Override
   public boolean isEnableSplitCommit() {
-    return _instanceDataManagerConfiguration.getProperty(ENABLE_SPLIT_COMMIT, false);
+    return _instanceDataManagerConfiguration.getProperty(ENABLE_SPLIT_COMMIT, true);
   }
 
   @Override
@@ -188,7 +208,7 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
 
   @Override
   public boolean isRealtimeOffHeapAllocation() {
-    return _instanceDataManagerConfiguration.getProperty(REALTIME_OFFHEAP_ALLOCATION, false);
+    return _instanceDataManagerConfiguration.getProperty(REALTIME_OFFHEAP_ALLOCATION, true);
   }
 
   @Override
@@ -216,30 +236,48 @@ public class HelixInstanceDataManagerConfig implements InstanceDataManagerConfig
   }
 
   @Override
-  public String getAuthToken() {
-    return _instanceDataManagerConfiguration.getProperty(AUTH_TOKEN);
+  public int getMaxParallelSegmentDownloads() {
+    return _instanceDataManagerConfiguration.getProperty(MAX_PARALLEL_SEGMENT_DOWNLOADS,
+        DEFAULT_MAX_PARALLEL_SEGMENT_DOWNLOADS);
   }
 
-  @Override
-  public String getTierBackend() {
-    return _instanceDataManagerConfiguration.getProperty(TIER_BACKEND, DEFAULT_TIER_BACKEND);
-  }
-
-  @Override
-  public PinotConfiguration getTierConfigs() {
-    String tierBackend = getTierBackend();
-    String tierConfigsPrefix = String.format("%s.%s", TIER_CONFIGS_PREFIX, tierBackend);
-    Map<String, Object> tierConfigs =
-        new HashMap<>(_instanceDataManagerConfiguration.subset(tierConfigsPrefix).toMap());
-    if (!tierConfigs.containsKey(READ_MODE)) {
-      tierConfigs.put(READ_MODE, getReadMode());
-    }
-    return new PinotConfiguration(tierConfigs);
+  public String getSegmentDirectoryLoader() {
+    return _instanceDataManagerConfiguration.getProperty(SEGMENT_DIRECTORY_LOADER,
+        SegmentDirectoryLoaderRegistry.DEFAULT_SEGMENT_DIRECTORY_LOADER_NAME);
   }
 
   @Override
   public long getErrorCacheSize() {
     return _instanceDataManagerConfiguration.getProperty(ERROR_CACHE_SIZE, DEFAULT_ERROR_CACHE_SIZE);
+  }
+
+  @Override
+  public boolean isStreamSegmentDownloadUntar() {
+    return _instanceDataManagerConfiguration.getProperty(ENABLE_STREAM_SEGMENT_DOWNLOAD_UNTAR,
+        DEFAULT_ENABLE_STREAM_SEGMENT_DOWNLOAD_UNTAR);
+  }
+
+  @Override
+  public long getStreamSegmentDownloadUntarRateLimit() {
+    return _instanceDataManagerConfiguration.getProperty(STREAM_SEGMENT_DOWNLOAD_UNTAR_RATE_LIMIT,
+        DEFAULT_STREAM_SEGMENT_DOWNLOAD_UNTAR_RATE_LIMIT);
+  }
+
+  @Override
+  public int getDeletedSegmentsCacheSize() {
+    return _instanceDataManagerConfiguration.getProperty(DELETED_SEGMENTS_CACHE_SIZE,
+        DEFAULT_DELETED_SEGMENTS_CACHE_SIZE);
+  }
+
+  @Override
+  public int getDeletedSegmentsCacheTtlMinutes() {
+    return _instanceDataManagerConfiguration.getProperty(DELETED_SEGMENTS_CACHE_TTL_MINUTES,
+        DEFAULT_DELETED_SEGMENTS_CACHE_TTL_MINUTES);
+  }
+
+  @Override
+  public String getSegmentPeerDownloadScheme() {
+    return _instanceDataManagerConfiguration.getProperty(PEER_DOWNLOAD_SCHEME);
   }
 
   @Override

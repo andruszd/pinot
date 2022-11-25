@@ -21,9 +21,11 @@ package org.apache.pinot.segment.local.realtime.impl.dictionary;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import it.unimi.dsi.fastutil.ints.IntSets;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.pinot.common.request.context.predicate.RangePredicate;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.BigDecimalUtils;
 import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.spi.utils.BytesUtils;
 
@@ -124,6 +126,11 @@ public class BytesOnHeapMutableDictionary extends BaseOnHeapMutableDictionary {
   }
 
   @Override
+  public int indexOf(ByteArray bytesValue) {
+    return getDictId(bytesValue);
+  }
+
+  @Override
   public byte[] get(int dictId) {
     return getBytesValue(dictId);
   }
@@ -151,6 +158,11 @@ public class BytesOnHeapMutableDictionary extends BaseOnHeapMutableDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimalUtils.deserialize(getBytesValue(dictId));
   }
 
   @Override

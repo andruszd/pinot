@@ -36,8 +36,8 @@ import org.apache.commons.io.FileUtils;
 import org.apache.pinot.plugin.inputformat.avro.AvroUtils;
 import org.apache.pinot.segment.local.aggregator.PercentileTDigestValueAggregator;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
-import org.apache.pinot.segment.local.loader.LocalSegmentDirectoryLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.segment.index.readers.BaseImmutableDictionary;
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
@@ -168,8 +168,8 @@ public class SegmentGenerationWithBytesTypeTest {
     for (int i = 0; i < NUM_ROWS; i++) {
       int value = (i * NUM_SORTED_VALUES) / NUM_ROWS;
       // For sorted columns, values are written as 0, 0, 0.., 1, 1, 1...n, n, n
-      Assert
-          .assertEquals(dictionary.indexOf(BytesUtils.toHexString(Ints.toByteArray(value))), value % NUM_SORTED_VALUES);
+      Assert.assertEquals(dictionary.indexOf(BytesUtils.toHexString(Ints.toByteArray(value))),
+          value % NUM_SORTED_VALUES);
     }
 
     // Test value not in dictionary.
@@ -217,8 +217,8 @@ public class SegmentGenerationWithBytesTypeTest {
     int i = 0;
     while (reader.hasNext()) {
       row = reader.next(row);
-      Assert
-          .assertEquals(ByteArray.compare((byte[]) row.getValue(FIXED_BYTES_UNSORTED_COLUMN), fixedExpected.get(i)), 0);
+      Assert.assertEquals(ByteArray.compare((byte[]) row.getValue(FIXED_BYTES_UNSORTED_COLUMN), fixedExpected.get(i)),
+          0);
       Assert.assertEquals(ByteArray.compare((byte[]) row.getValue(VARIABLE_BYTES_COLUMN), varExpected.get(i++)), 0);
     }
     segment.destroy();
@@ -271,10 +271,10 @@ public class SegmentGenerationWithBytesTypeTest {
     driver.build();
 
     Map<String, Object> props = new HashMap<>();
-    props.put(LocalSegmentDirectoryLoader.READ_MODE_KEY, ReadMode.mmap.toString());
-    SegmentDirectoryLoaderRegistry.getLocalSegmentDirectoryLoader()
-        .load(driver.getOutputDirectory().toURI(),
-            new SegmentDirectoryLoaderContext(_tableConfig, null, new PinotConfiguration(props)));
+    props.put(IndexLoadingConfig.READ_MODE_KEY, ReadMode.mmap.toString());
+    SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader().load(driver.getOutputDirectory().toURI(),
+        new SegmentDirectoryLoaderContext.Builder().setTableConfig(_tableConfig)
+            .setSegmentDirectoryConfigs(new PinotConfiguration(props)).build());
     recordReader.rewind();
     return recordReader;
   }

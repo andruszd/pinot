@@ -21,16 +21,24 @@ package org.apache.pinot.integration.tests;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.apache.commons.io.FileUtils;
+import org.apache.http.HttpStatus;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
+import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.ReadMode;
@@ -42,14 +50,15 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 
 /**
- * Integration test that extends RealtimeClusterIntegrationTest but uses low-level Kafka consumer.
+ * Integration test for low-level Kafka consumer.
  * TODO: Add separate module-level tests and remove the randomness of this test
  */
-public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegrationTest {
+public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegrationTest {
   private static final String CONSUMER_DIRECTORY = "/tmp/consumer-test";
   private static final String TEST_UPDATED_INVERTED_INDEX_QUERY =
       "SELECT COUNT(*) FROM mytable WHERE DivActualElapsedTime = 305";
@@ -64,7 +73,7 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
   private final long _startTime = System.currentTimeMillis();
 
   @Override
-  protected boolean useLlc() {
+  protected boolean injectTombstones() {
     return true;
   }
 
@@ -98,14 +107,93 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
     }
   }
 
+  @Override
+  protected void createSegmentsAndUpload(List<File> avroFiles, Schema schema, TableConfig tableConfig)
+      throws Exception {
+    if (!_tarDir.exists()) {
+      _tarDir.mkdir();
+    }
+    if (!_segmentDir.exists()) {
+      _segmentDir.mkdir();
+    }
+
+    // create segments out of the avro files (segments will be placed in _tarDir)
+    List<File> copyOfAvroFiles = new ArrayList<>(avroFiles);
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(copyOfAvroFiles, tableConfig, schema, 0, _segmentDir, _tarDir);
+
+    // upload segments to controller
+    uploadSegmentsToController(getTableName(), _tarDir, false, false);
+
+    // upload the first segment again to verify refresh
+    uploadSegmentsToController(getTableName(), _tarDir, true, false);
+
+    // upload the first segment again to verify refresh with different segment crc
+    uploadSegmentsToController(getTableName(), _tarDir, true, true);
+
+    // add avro files to the original list so H2 will have the uploaded data as well
+    avroFiles.addAll(copyOfAvroFiles);
+  }
+
+  private void uploadSegmentsToController(String tableName, File tarDir, boolean onlyFirstSegment, boolean changeCrc)
+      throws Exception {
+    File[] segmentTarFiles = tarDir.listFiles();
+    assertNotNull(segmentTarFiles);
+    int numSegments = segmentTarFiles.length;
+    assertTrue(numSegments > 0);
+    if (onlyFirstSegment) {
+      numSegments = 1;
+    }
+    URI uploadSegmentHttpURI = FileUploadDownloadClient.getUploadSegmentHttpURI(LOCAL_HOST, _controllerPort);
+    try (FileUploadDownloadClient fileUploadDownloadClient = new FileUploadDownloadClient()) {
+      if (numSegments == 1) {
+        File segmentTarFile = segmentTarFiles[0];
+        if (changeCrc) {
+          changeCrcInSegmentZKMetadata(tableName, segmentTarFile.toString());
+        }
+        assertEquals(
+            fileUploadDownloadClient.uploadSegment(uploadSegmentHttpURI, segmentTarFile.getName(), segmentTarFile,
+                tableName, TableType.REALTIME).getStatusCode(), HttpStatus.SC_OK);
+      } else {
+        // Upload segments in parallel
+        ExecutorService executorService = Executors.newFixedThreadPool(numSegments);
+        List<Future<Integer>> futures = new ArrayList<>(numSegments);
+        for (File segmentTarFile : segmentTarFiles) {
+          futures.add(executorService.submit(
+              () -> fileUploadDownloadClient.uploadSegment(uploadSegmentHttpURI, segmentTarFile.getName(),
+                  segmentTarFile, tableName, TableType.REALTIME).getStatusCode()));
+        }
+        executorService.shutdown();
+        for (Future<Integer> future : futures) {
+          assertEquals((int) future.get(), HttpStatus.SC_OK);
+        }
+      }
+    }
+  }
+
+  private void changeCrcInSegmentZKMetadata(String tableName, String segmentFilePath) {
+    int startIdx = segmentFilePath.indexOf("mytable_");
+    int endIdx = segmentFilePath.indexOf(".tar.gz");
+    String segmentName = segmentFilePath.substring(startIdx, endIdx);
+    String tableNameWithType = TableNameBuilder.forType(TableType.REALTIME).tableNameWithType(tableName);
+    SegmentZKMetadata segmentZKMetadata = _helixResourceManager.getSegmentZKMetadata(tableNameWithType, segmentName);
+    segmentZKMetadata.setCrc(111L);
+    _helixResourceManager.updateZkMetadata(tableNameWithType, segmentZKMetadata);
+  }
+
+  @Override
+  protected long getCountStarResult() {
+    // all the data that was ingested from Kafka also got uploaded via the controller's upload endpoint
+    return super.getCountStarResult() * 2;
+  }
+
   @BeforeClass
   @Override
   public void setUp()
       throws Exception {
     System.out.println(String.format(
         "Using random seed: %s, isDirectAlloc: %s, isConsumerDirConfigured: %s, enableSplitCommit: %s, "
-            + "enableLeadControllerResource: %s",
-        RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured, _enableSplitCommit, _enableLeadControllerResource));
+            + "enableLeadControllerResource: %s", RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured,
+        _enableSplitCommit, _enableLeadControllerResource));
 
     // Remove the consumer directory
     FileUtils.deleteQuietly(new File(CONSUMER_DIRECTORY));
@@ -133,9 +221,11 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
     String realtimeTableName = TableNameBuilder.REALTIME.tableNameWithType(getTableName());
     List<SegmentZKMetadata> segmentsZKMetadata =
         ZKMetadataProvider.getSegmentsZKMetadata(_propertyStore, realtimeTableName);
-    for (SegmentZKMetadata segmentZKMetadata : segmentsZKMetadata) {
-      assertEquals(segmentZKMetadata.getSizeThresholdToFlushSegment(),
-          getRealtimeSegmentFlushSize() / getNumKafkaPartitions());
+    for (SegmentZKMetadata segMetadata : segmentsZKMetadata) {
+      if (segMetadata.getStatus() != CommonConstants.Segment.Realtime.Status.UPLOADED) {
+        assertEquals(segMetadata.getSizeThresholdToFlushSegment(),
+            getRealtimeSegmentFlushSize() / getNumKafkaPartitions());
+      }
     }
   }
 
@@ -158,10 +248,12 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
         JsonNode queryResponse1 = postQuery(TEST_UPDATED_INVERTED_INDEX_QUERY);
         // Total docs should not change during reload
         assertEquals(queryResponse1.get("totalDocs").asLong(), numTotalDocs);
-        assertEquals(queryResponse1.get("numConsumingSegmentsQueried").asLong(), 2);
-        assertTrue(queryResponse1.get("minConsumingFreshnessTimeMs").asLong() > _startTime);
-        assertTrue(queryResponse1.get("minConsumingFreshnessTimeMs").asLong() < System.currentTimeMillis());
-        return queryResponse1.get("numEntriesScannedInFilter").asLong() == 0;
+
+        long numConsumingSegmentsQueried = queryResponse1.get("numConsumingSegmentsQueried").asLong();
+        long minConsumingFreshnessTimeMs = queryResponse1.get("minConsumingFreshnessTimeMs").asLong();
+        long numEntriesScannedInFilter = queryResponse1.get("numEntriesScannedInFilter").asLong();
+        return numConsumingSegmentsQueried == 2 && minConsumingFreshnessTimeMs > _startTime
+            && minConsumingFreshnessTimeMs < System.currentTimeMillis() && numEntriesScannedInFilter == 0;
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -180,6 +272,12 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
   public void testReload()
       throws Exception {
     testReload(false);
+  }
+
+  @Test
+  public void testReset()
+      throws Exception {
+    super.testReset(TableType.REALTIME);
   }
 
   @Test

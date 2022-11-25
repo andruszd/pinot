@@ -19,7 +19,6 @@
 package org.apache.pinot.spi.data.readers;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
@@ -39,6 +38,8 @@ public class RecordReaderFactory {
 
   // TODO: This could be removed once we have dynamic loading plugins supports.
   static final String DEFAULT_AVRO_RECORD_READER_CLASS = "org.apache.pinot.plugin.inputformat.avro.AvroRecordReader";
+  static final String DEFAULT_AVRO_RECORD_READER_CONFIG_CLASS =
+      "org.apache.pinot.plugin.inputformat.avro.AvroRecordReaderConfig";
   static final String DEFAULT_CSV_RECORD_READER_CLASS = "org.apache.pinot.plugin.inputformat.csv.CSVRecordReader";
   static final String DEFAULT_CSV_RECORD_READER_CONFIG_CLASS =
       "org.apache.pinot.plugin.inputformat.csv.CSVRecordReaderConfig";
@@ -63,8 +64,8 @@ public class RecordReaderFactory {
   }
 
   static {
-    register(FileFormat.AVRO, DEFAULT_AVRO_RECORD_READER_CLASS, null);
-    register(FileFormat.GZIPPED_AVRO, DEFAULT_AVRO_RECORD_READER_CLASS, null);
+    register(FileFormat.AVRO, DEFAULT_AVRO_RECORD_READER_CLASS, DEFAULT_AVRO_RECORD_READER_CONFIG_CLASS);
+    register(FileFormat.GZIPPED_AVRO, DEFAULT_AVRO_RECORD_READER_CLASS, DEFAULT_AVRO_RECORD_READER_CONFIG_CLASS);
     register(FileFormat.CSV, DEFAULT_CSV_RECORD_READER_CLASS, DEFAULT_CSV_RECORD_READER_CONFIG_CLASS);
     register(FileFormat.JSON, DEFAULT_JSON_RECORD_READER_CLASS, null);
     register(FileFormat.THRIFT, DEFAULT_THRIFT_RECORD_READER_CLASS, DEFAULT_THRIFT_RECORD_READER_CONFIG_CLASS);
@@ -130,7 +131,7 @@ public class RecordReaderFactory {
       throws ClassNotFoundException, IOException {
     String readerConfigClassName = getRecordReaderConfigClassName(fileFormat.toString());
     if (readerConfigClassName != null) {
-      JsonNode jsonNode = new ObjectMapper().valueToTree(configs);
+      JsonNode jsonNode = JsonUtils.objectToJsonNode(configs);
       Class<?> clazz = PluginManager.get().loadClass(readerConfigClassName);
       return (RecordReaderConfig) JsonUtils.jsonNodeToObject(jsonNode, clazz);
     }

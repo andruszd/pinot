@@ -20,15 +20,20 @@ package org.apache.pinot.segment.local.realtime.impl;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
+import org.apache.pinot.segment.local.dedup.PartitionDedupMetadataManager;
 import org.apache.pinot.segment.local.indexsegment.mutable.MutableSegmentImpl;
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.local.upsert.PartitionUpsertMetadataManager;
 import org.apache.pinot.segment.spi.index.creator.H3IndexConfig;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
+import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.JsonIndexConfig;
 import org.apache.pinot.spi.config.table.UpsertConfig;
+import org.apache.pinot.spi.config.table.ingestion.AggregationConfig;
 import org.apache.pinot.spi.data.Schema;
 
 
@@ -45,7 +50,7 @@ public class RealtimeSegmentConfig {
   private final Set<String> _invertedIndexColumns;
   private final Set<String> _textIndexColumns;
   private final Set<String> _fstIndexColumns;
-  private final Set<String> _jsonIndexColumns;
+  private final Map<String, JsonIndexConfig> _jsonIndexConfigs;
   private final Map<String, H3IndexConfig> _h3IndexConfigs;
   private final SegmentZKMetadata _segmentZKMetadata;
   private final boolean _offHeap;
@@ -57,21 +62,25 @@ public class RealtimeSegmentConfig {
   private final boolean _aggregateMetrics;
   private final boolean _nullHandlingEnabled;
   private final UpsertConfig.Mode _upsertMode;
-  private final UpsertConfig.HashFunction _hashFunction;
   private final String _upsertComparisonColumn;
   private final PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
+  private final PartitionDedupMetadataManager _partitionDedupMetadataManager;
   private final String _consumerDir;
+  private final List<FieldConfig> _fieldConfigList;
+  private final List<AggregationConfig> _ingestionAggregationConfigs;
 
   // TODO: Clean up this constructor. Most of these things can be extracted from tableConfig.
   private RealtimeSegmentConfig(String tableNameWithType, String segmentName, String streamName, Schema schema,
       String timeColumnName, int capacity, int avgNumMultiValues, Set<String> noDictionaryColumns,
       Set<String> varLengthDictionaryColumns, Set<String> invertedIndexColumns, Set<String> textIndexColumns,
-      Set<String> fstIndexColumns, Set<String> jsonIndexColumns, Map<String, H3IndexConfig> h3IndexConfigs,
-      SegmentZKMetadata segmentZKMetadata, boolean offHeap, PinotDataBufferMemoryManager memoryManager,
-      RealtimeSegmentStatsHistory statsHistory, String partitionColumn, PartitionFunction partitionFunction,
-      int partitionId, boolean aggregateMetrics, boolean nullHandlingEnabled, String consumerDir,
-      UpsertConfig.Mode upsertMode, String upsertComparisonColumn, UpsertConfig.HashFunction hashFunction,
-      PartitionUpsertMetadataManager partitionUpsertMetadataManager) {
+      Set<String> fstIndexColumns, Map<String, JsonIndexConfig> jsonIndexConfigs,
+      Map<String, H3IndexConfig> h3IndexConfigs, SegmentZKMetadata segmentZKMetadata, boolean offHeap,
+      PinotDataBufferMemoryManager memoryManager, RealtimeSegmentStatsHistory statsHistory, String partitionColumn,
+      PartitionFunction partitionFunction, int partitionId, boolean aggregateMetrics, boolean nullHandlingEnabled,
+      String consumerDir, UpsertConfig.Mode upsertMode, String upsertComparisonColumn,
+      PartitionUpsertMetadataManager partitionUpsertMetadataManager,
+      PartitionDedupMetadataManager partitionDedupMetadataManager, List<FieldConfig> fieldConfigList,
+      List<AggregationConfig> ingestionAggregationConfigs) {
     _tableNameWithType = tableNameWithType;
     _segmentName = segmentName;
     _streamName = streamName;
@@ -84,7 +93,7 @@ public class RealtimeSegmentConfig {
     _invertedIndexColumns = invertedIndexColumns;
     _textIndexColumns = textIndexColumns;
     _fstIndexColumns = fstIndexColumns;
-    _jsonIndexColumns = jsonIndexColumns;
+    _jsonIndexConfigs = jsonIndexConfigs;
     _h3IndexConfigs = h3IndexConfigs;
     _segmentZKMetadata = segmentZKMetadata;
     _offHeap = offHeap;
@@ -97,9 +106,11 @@ public class RealtimeSegmentConfig {
     _nullHandlingEnabled = nullHandlingEnabled;
     _consumerDir = consumerDir;
     _upsertMode = upsertMode != null ? upsertMode : UpsertConfig.Mode.NONE;
-    _hashFunction = hashFunction != null ? hashFunction : UpsertConfig.HashFunction.NONE;
     _upsertComparisonColumn = upsertComparisonColumn;
     _partitionUpsertMetadataManager = partitionUpsertMetadataManager;
+    _partitionDedupMetadataManager = partitionDedupMetadataManager;
+    _fieldConfigList = fieldConfigList;
+    _ingestionAggregationConfigs = ingestionAggregationConfigs;
   }
 
   public String getTableNameWithType() {
@@ -155,8 +166,8 @@ public class RealtimeSegmentConfig {
     return _fstIndexColumns;
   }
 
-  public Set<String> getJsonIndexColumns() {
-    return _jsonIndexColumns;
+  public Map<String, JsonIndexConfig> getJsonIndexConfigs() {
+    return _jsonIndexConfigs;
   }
 
   public Map<String, H3IndexConfig> getH3IndexConfigs() {
@@ -207,8 +218,8 @@ public class RealtimeSegmentConfig {
     return _upsertMode;
   }
 
-  public UpsertConfig.HashFunction getHashFunction() {
-    return _hashFunction;
+  public boolean isDedupEnabled() {
+    return _partitionDedupMetadataManager != null;
   }
 
   public String getUpsertComparisonColumn() {
@@ -217,6 +228,18 @@ public class RealtimeSegmentConfig {
 
   public PartitionUpsertMetadataManager getPartitionUpsertMetadataManager() {
     return _partitionUpsertMetadataManager;
+  }
+
+  public PartitionDedupMetadataManager getPartitionDedupMetadataManager() {
+    return _partitionDedupMetadataManager;
+  }
+
+  public List<FieldConfig> getFieldConfigList() {
+    return _fieldConfigList;
+  }
+
+  public List<AggregationConfig> getIngestionAggregationConfigs() {
+    return _ingestionAggregationConfigs;
   }
 
   public static class Builder {
@@ -232,7 +255,7 @@ public class RealtimeSegmentConfig {
     private Set<String> _invertedIndexColumns;
     private Set<String> _textIndexColumns = new HashSet<>();
     private Set<String> _fstIndexColumns = new HashSet<>();
-    private Set<String> _jsonIndexColumns = new HashSet<>();
+    private Map<String, JsonIndexConfig> _jsonIndexConfigs = new HashMap<>();
     private Map<String, H3IndexConfig> _h3IndexConfigs = new HashMap<>();
     private SegmentZKMetadata _segmentZKMetadata;
     private boolean _offHeap;
@@ -245,9 +268,11 @@ public class RealtimeSegmentConfig {
     private boolean _nullHandlingEnabled = false;
     private String _consumerDir;
     private UpsertConfig.Mode _upsertMode;
-    private UpsertConfig.HashFunction _hashFunction;
     private String _upsertComparisonColumn;
     private PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
+    private PartitionDedupMetadataManager _partitionDedupMetadataManager;
+    private List<FieldConfig> _fieldConfigList;
+    private List<AggregationConfig> _ingestionAggregationConfigs;
 
     public Builder() {
     }
@@ -320,8 +345,8 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
-    public Builder setJsonIndexColumns(Set<String> jsonIndexColumns) {
-      _jsonIndexColumns = jsonIndexColumns;
+    public Builder setJsonIndexConfigs(Map<String, JsonIndexConfig> jsonIndexConfigs) {
+      _jsonIndexConfigs = jsonIndexConfigs;
       return this;
     }
 
@@ -385,11 +410,6 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
-    public Builder setHashFunction(UpsertConfig.HashFunction hashFunction) {
-      _hashFunction = hashFunction;
-      return this;
-    }
-
     public Builder setUpsertComparisonColumn(String upsertComparisonColumn) {
       _upsertComparisonColumn = upsertComparisonColumn;
       return this;
@@ -400,13 +420,28 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
+    public Builder setPartitionDedupMetadataManager(PartitionDedupMetadataManager partitionDedupMetadataManager) {
+      _partitionDedupMetadataManager = partitionDedupMetadataManager;
+      return this;
+    }
+
+    public Builder setFieldConfigList(List<FieldConfig> fieldConfigList) {
+      _fieldConfigList = fieldConfigList;
+      return this;
+    }
+
+    public Builder setIngestionAggregationConfigs(List<AggregationConfig> ingestionAggregationConfigs) {
+      _ingestionAggregationConfigs = ingestionAggregationConfigs;
+      return this;
+    }
+
     public RealtimeSegmentConfig build() {
       return new RealtimeSegmentConfig(_tableNameWithType, _segmentName, _streamName, _schema, _timeColumnName,
           _capacity, _avgNumMultiValues, _noDictionaryColumns, _varLengthDictionaryColumns, _invertedIndexColumns,
-          _textIndexColumns, _fstIndexColumns, _jsonIndexColumns, _h3IndexConfigs, _segmentZKMetadata, _offHeap,
+          _textIndexColumns, _fstIndexColumns, _jsonIndexConfigs, _h3IndexConfigs, _segmentZKMetadata, _offHeap,
           _memoryManager, _statsHistory, _partitionColumn, _partitionFunction, _partitionId, _aggregateMetrics,
-          _nullHandlingEnabled, _consumerDir, _upsertMode, _upsertComparisonColumn, _hashFunction,
-          _partitionUpsertMetadataManager);
+          _nullHandlingEnabled, _consumerDir, _upsertMode, _upsertComparisonColumn, _partitionUpsertMetadataManager,
+          _partitionDedupMetadataManager, _fieldConfigList, _ingestionAggregationConfigs);
     }
   }
 }

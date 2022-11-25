@@ -25,7 +25,9 @@ import org.apache.pinot.common.Utils;
  * Controller gauges.
  */
 public enum ControllerGauge implements AbstractMetrics.Gauge {
+  VERSION("version", true),
 
+  REPLICATION_FROM_CONFIG("replicas", false),
   // Number of complete replicas of table in external view containing all segments online in ideal state
   NUMBER_OF_REPLICAS("replicas", false),
 
@@ -39,6 +41,11 @@ public enum ControllerGauge implements AbstractMetrics.Gauge {
   PERCENT_SEGMENTS_AVAILABLE("segments", false),
 
   SEGMENT_COUNT("SegmentCount", false),
+
+  // Number of segments including the replaced segments which are specified in the segment lineage entries and cannot
+  // be queried from the table.
+  SEGMENT_COUNT_INCLUDING_REPLACED("SegmentCount", false),
+
   IDEALSTATE_ZNODE_SIZE("idealstate", false),
   IDEALSTATE_ZNODE_BYTE_SIZE("idealstate", false),
   REALTIME_TABLE_COUNT("TableCount", true),
@@ -62,7 +69,19 @@ public enum ControllerGauge implements AbstractMetrics.Gauge {
   CONTROLLER_LEADER_PARTITION_COUNT("ControllerLeaderPartitionCount", true),
 
   // Estimated size of offline table
+  @Deprecated // Instead use TABLE_TOTAL_SIZE_ON_SERVER
   OFFLINE_TABLE_ESTIMATED_SIZE("OfflineTableEstimatedSize", false),
+
+  LARGEST_SEGMENT_SIZE_ON_SERVER("LargestSegmentSizeOnServer", false),
+
+  // Total size of table across replicas on servers
+  TABLE_TOTAL_SIZE_ON_SERVER("TableTotalSizeOnServer", false),
+
+  // Size of table per replica on servers
+  TABLE_SIZE_PER_REPLICA_ON_SERVER("TableSizePerReplicaOnServer", false),
+
+  // Total size of compressed segments per table
+  TABLE_COMPRESSED_SIZE("TableCompressedSize", false),
 
   // Table quota based on setting in table config
   TABLE_QUOTA("TableQuotaBasedOnTableConfig", false),
@@ -83,7 +102,28 @@ public enum ControllerGauge implements AbstractMetrics.Gauge {
   DROPPED_MINION_INSTANCES("droppedMinionInstances", true),
 
   // Number of online minion instances
-  ONLINE_MINION_INSTANCES("onlineMinionInstances", true);
+  ONLINE_MINION_INSTANCES("onlineMinionInstances", true),
+
+  // Number of partitions with missing consuming segments in ideal state
+  MISSING_CONSUMING_SEGMENT_TOTAL_COUNT("missingConsumingSegmentTotalCount", false),
+
+  // Number of new partitions with missing consuming segments in ideal state
+  MISSING_CONSUMING_SEGMENT_NEW_PARTITION_COUNT("missingConsumingSegmentNewPartitionCount", false),
+
+  // Maximum duration of a missing consuming segment in ideal state (in minutes)
+  MISSING_CONSUMING_SEGMENT_MAX_DURATION_MINUTES("missingSegmentsMaxDurationInMinutes", false),
+
+  // Number of in progress segment downloads
+  SEGMENT_DOWNLOADS_IN_PROGRESS("segmentDownloadsInProgress", true),
+
+  // Number of in progress segment uploads
+  SEGMENT_UPLOADS_IN_PROGRESS("segmentUploadsInProgress", true),
+
+  // Records lag at a partition level
+  MAX_RECORDS_LAG("maxRecordsLag", false),
+
+  // Consumption availability lag in ms at a partition level
+  MAX_RECORD_AVAILABILITY_LAG_MS("maxRecordAvailabilityLagMs", false);
 
   private final String _gaugeName;
   private final String _unit;

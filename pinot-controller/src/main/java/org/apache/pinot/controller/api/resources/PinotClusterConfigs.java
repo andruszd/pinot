@@ -21,16 +21,20 @@ package org.apache.pinot.controller.api.resources;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiKeyAuthDefinition;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import io.swagger.annotations.ApiResponse;
 import io.swagger.annotations.ApiResponses;
+import io.swagger.annotations.Authorization;
+import io.swagger.annotations.SecurityDefinition;
+import io.swagger.annotations.SwaggerDefinition;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import javax.inject.Inject;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
@@ -38,6 +42,7 @@ import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.helix.HelixAdmin;
@@ -51,8 +56,12 @@ import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
-@Api(tags = Constants.CLUSTER_TAG)
+
+@Api(tags = Constants.CLUSTER_TAG, authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
+@SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
+    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
 @Path("/")
 public class PinotClusterConfigs {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotClusterConfigs.class);
@@ -108,14 +117,17 @@ public class PinotClusterConfigs {
     try {
       JsonNode jsonNode = JsonUtils.stringToJsonNode(body);
       HelixAdmin admin = _pinotHelixResourceManager.getHelixAdmin();
-      HelixConfigScope configScope = new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER)
-          .forCluster(_pinotHelixResourceManager.getHelixClusterName()).build();
+      HelixConfigScope configScope =
+          new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(
+              _pinotHelixResourceManager.getHelixClusterName()).build();
       Iterator<String> fieldNamesIterator = jsonNode.fieldNames();
+      Map<String, String> properties = new TreeMap<>();
       while (fieldNamesIterator.hasNext()) {
         String key = fieldNamesIterator.next();
-        String value = jsonNode.get(key).textValue();
-        admin.setConfig(configScope, Collections.singletonMap(key, value));
+        JsonNode valueNode = jsonNode.get(key);
+        properties.put(key, valueNode.isNull() ? null : valueNode.asText());
       }
+      admin.setConfig(configScope, properties);
       return new SuccessResponse("Updated cluster config.");
     } catch (IOException e) {
       throw new ControllerApplicationException(LOGGER, "Error converting request to cluster config.",
@@ -141,7 +153,7 @@ public class PinotClusterConfigs {
       HelixAdmin admin = _pinotHelixResourceManager.getHelixAdmin();
       HelixConfigScope configScope = new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER)
           .forCluster(_pinotHelixResourceManager.getHelixClusterName()).build();
-      admin.removeConfig(configScope, Arrays.asList(configName));
+      admin.removeConfig(configScope, Collections.singletonList(configName));
       return new SuccessResponse("Deleted cluster config: " + configName);
     } catch (Exception e) {
       String errStr = "Failed to delete cluster config: " + configName;

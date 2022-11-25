@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.segment.local.segment.index.readers;
 
+import java.math.BigDecimal;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
@@ -35,6 +36,16 @@ public class ConstantValueFloatDictionary extends BaseImmutableDictionary {
   @Override
   public DataType getValueType() {
     return DataType.FLOAT;
+  }
+
+  @Override
+  public int indexOf(String stringValue) {
+    return Float.parseFloat(stringValue) == _value ? 0 : NULL_VALUE_INDEX;
+  }
+
+  @Override
+  public int indexOf(float floatValue) {
+    return floatValue == _value ? 0 : NULL_VALUE_INDEX;
   }
 
   @Override
@@ -87,6 +98,11 @@ public class ConstantValueFloatDictionary extends BaseImmutableDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return _value;
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(_value);
   }
 
   @Override

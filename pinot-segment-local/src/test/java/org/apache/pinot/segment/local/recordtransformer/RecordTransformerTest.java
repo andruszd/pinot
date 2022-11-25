@@ -30,7 +30,6 @@ import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.data.TimeGranularitySpec;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.Assert;
@@ -82,40 +81,40 @@ public class RecordTransformerTest {
     record.putValue("svStringWithLengthLimit", "123");
     record.putValue("mvString1", new Object[]{"123", 123, 123L, 123f, 123.0});
     record.putValue("mvString2", new Object[]{123, 123L, 123f, 123.0, "123"});
+    record.putValue("svNullString", null);
     return record;
   }
 
   @Test
   public void testFilterTransformer() {
-    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").build();
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setIngestionConfig(ingestionConfig).build();
 
     // expression false, not filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("Groovy({svInt > 123}, svInt)"));
     GenericRow genericRow = getRecord();
-    tableConfig.setIngestionConfig(
-        new IngestionConfig(null, null, new FilterConfig("Groovy({svInt > 123}, svInt)"), null, null));
+    tableConfig.setIngestionConfig(ingestionConfig);
     RecordTransformer transformer = new FilterTransformer(tableConfig);
     transformer.transform(genericRow);
     Assert.assertFalse(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
 
     // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("Groovy({svInt <= 123}, svInt)"));
     genericRow = getRecord();
-    tableConfig.setIngestionConfig(
-        new IngestionConfig(null, null, new FilterConfig("Groovy({svInt <= 123}, svInt)"), null, null));
     transformer = new FilterTransformer(tableConfig);
     transformer.transform(genericRow);
     Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
 
     // value not found
+    ingestionConfig.setFilterConfig(new FilterConfig("Groovy({notPresent == 123}, notPresent)"));
     genericRow = getRecord();
-    tableConfig.setIngestionConfig(
-        new IngestionConfig(null, null, new FilterConfig("Groovy({notPresent == 123}, notPresent)"), null, null));
     transformer = new FilterTransformer(tableConfig);
     transformer.transform(genericRow);
     Assert.assertFalse(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
 
     // invalid function
-    tableConfig
-        .setIngestionConfig(new IngestionConfig(null, null, new FilterConfig("Groovy(svInt == 123)"), null, null));
+    ingestionConfig.setFilterConfig(new FilterConfig("Groovy(svInt == 123)"));
     try {
       new FilterTransformer(tableConfig);
       Assert.fail("Should have failed constructing FilterTransformer");
@@ -124,9 +123,8 @@ public class RecordTransformerTest {
     }
 
     // multi value column
+    ingestionConfig.setFilterConfig(new FilterConfig("Groovy({svFloat.max() < 500}, svFloat)"));
     genericRow = getRecord();
-    tableConfig.setIngestionConfig(
-        new IngestionConfig(null, null, new FilterConfig("Groovy({svFloat.max() < 500}, svFloat)"), null, null));
     transformer = new FilterTransformer(tableConfig);
     transformer.transform(genericRow);
     Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
@@ -134,7 +132,7 @@ public class RecordTransformerTest {
 
   @Test
   public void testDataTypeTransformer() {
-    RecordTransformer transformer = new DataTypeTransformer(SCHEMA);
+    RecordTransformer transformer = new DataTypeTransformer(TABLE_CONFIG, SCHEMA);
     GenericRow record = getRecord();
     for (int i = 0; i < NUM_ROUNDS; i++) {
       record = transformer.transform(record);
@@ -164,6 +162,83 @@ public class RecordTransformerTest {
   }
 
   @Test
+  public void testDataTypeTransformerIncorrectDataTypes() {
+    Schema schema = new Schema.SchemaBuilder().addSingleValueDimension("svInt", DataType.BYTES)
+        .addSingleValueDimension("svLong", DataType.LONG).build();
+
+    RecordTransformer transformer = new DataTypeTransformer(TABLE_CONFIG, schema);
+    GenericRow record = getRecord();
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      assertThrows(() -> transformer.transform(record));
+    }
+
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    ingestionConfig.setContinueOnError(true);
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setIngestionConfig(ingestionConfig).setTableName("testTable").build();
+
+    RecordTransformer transformerWithDefaultNulls = new DataTypeTransformer(tableConfig, schema);
+    GenericRow record1 = getRecord();
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      record1 = transformerWithDefaultNulls.transform(record1);
+      assertNotNull(record1);
+      assertNull(record1.getValue("svInt"));
+    }
+  }
+
+  @Test
+  public void testTimeValidationTransformer() {
+    // Invalid timestamp, validation disabled
+    String timeCol = "timeCol";
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setTimeColumnName(timeCol).build();
+    Schema schema = new Schema.SchemaBuilder().addDateTime(timeCol, DataType.TIMESTAMP, "1:MILLISECONDS:TIMESTAMP",
+        "1:MILLISECONDS").build();
+    RecordTransformer transformer = new TimeValidationTransformer(tableConfig, schema);
+    GenericRow record = getRecord();
+    record.putValue(timeCol, 1L);
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      record = transformer.transform(record);
+      assertNotNull(record);
+      assertEquals(record.getValue(timeCol), 1L);
+    }
+
+    // Invalid timestamp, validation enabled
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    ingestionConfig.setRowTimeValueCheck(true);
+    tableConfig.setIngestionConfig(ingestionConfig);
+    RecordTransformer transformerWithValidation = new TimeValidationTransformer(tableConfig, schema);
+    GenericRow record1 = getRecord();
+    record1.putValue(timeCol, 1L);
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      assertThrows(() -> transformerWithValidation.transform(record1));
+    }
+
+    // Invalid timestamp, validation enabled and ignoreErrors enabled
+    ingestionConfig.setContinueOnError(true);
+    transformer = new TimeValidationTransformer(tableConfig, schema);
+    GenericRow record2 = getRecord();
+    record2.putValue(timeCol, 1L);
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      record2 = transformer.transform(record2);
+      assertNotNull(record2);
+      assertNull(record2.getValue(timeCol));
+    }
+
+    // Valid timestamp, validation enabled
+    ingestionConfig.setContinueOnError(false);
+    transformer = new TimeValidationTransformer(tableConfig, schema);
+    GenericRow record3 = getRecord();
+    Long currentTimeMillis = System.currentTimeMillis();
+    record3.putValue(timeCol, currentTimeMillis);
+    for (int i = 0; i < NUM_ROUNDS; i++) {
+      record3 = transformer.transform(record3);
+      assertNotNull(record3);
+      assertEquals(record3.getValue(timeCol), currentTimeMillis);
+    }
+  }
+
+  @Test
   public void testSanitationTransformer() {
     RecordTransformer transformer = new SanitizationTransformer(SCHEMA);
     GenericRow record = getRecord();
@@ -180,6 +255,135 @@ public class RecordTransformerTest {
   }
 
   @Test
+  public void testScalarOps() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setIngestionConfig(ingestionConfig).build();
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svInt = 123"));
+    GenericRow genericRow = getRecord();
+    RecordTransformer transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svDouble > 120"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svDouble >= 123"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svDouble < 200"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svDouble <= 123"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svLong != 125"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svLong = 123"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("between(svLong, 100, 125)"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+  }
+
+  private GenericRow getNullColumnsRecord() {
+    GenericRow record = new GenericRow();
+    record.putValue("svNullString", null);
+    record.putValue("svInt", (byte) 123);
+
+    record.putValue("mvLong", Collections.singletonList(123f));
+    record.putValue("mvNullFloat", null);
+    return record;
+  }
+
+  @Test
+  public void testObjectOps() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setIngestionConfig(ingestionConfig).build();
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svNullString is null"));
+    GenericRow genericRow = getNullColumnsRecord();
+    RecordTransformer transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svInt is not null"));
+    genericRow = getNullColumnsRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("mvLong is not null"));
+    genericRow = getNullColumnsRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("mvNullFloat is null"));
+    genericRow = getNullColumnsRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+  }
+
+  @Test
+  public void testLogicalScalarOps() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName("testTable").setIngestionConfig(ingestionConfig).build();
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svInt = 123 AND svDouble <= 200"));
+    GenericRow genericRow = getRecord();
+    RecordTransformer transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+
+    // expression true, filtered
+    ingestionConfig.setFilterConfig(new FilterConfig("svInt = 125 OR svLong <= 200"));
+    genericRow = getRecord();
+    transformer = new FilterTransformer(tableConfig);
+    transformer.transform(genericRow);
+    Assert.assertTrue(genericRow.getFieldToValueMap().containsKey(GenericRow.SKIP_RECORD_KEY));
+  }
+
+  @Test
   public void testNullValueTransformer() {
     RecordTransformer transformer = new NullValueTransformer(TABLE_CONFIG, SCHEMA);
     GenericRow record = new GenericRow();
@@ -189,98 +393,75 @@ public class RecordTransformerTest {
       validateNullValueTransformerResult(record);
     }
 
-    // test null value handling for time column disabled by default.
-    String columnInTimeType = "columnInTimeType";
-    String columnInDateTimeType = "columnInDateTimeType";
-    String dateTimeFormat = "5:MINUTES:EPOCH";
-    Schema schemaWithTimeColumn = new Schema.SchemaBuilder()
-        .addTime(new TimeGranularitySpec(DataType.LONG, TimeUnit.SECONDS, columnInTimeType), null)
-        .addDateTime(columnInDateTimeType, DataType.STRING, dateTimeFormat, "5:MINUTES").build();
-    // Set time column to be columnInTimeType, so the expected value is null.
-    // The value in columnInDateTimeType will be filled with default value based on data type.
+    String timeColumn = "timeColumn";
     TableConfig tableConfig =
-        new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").setTimeColumnName(columnInTimeType)
+        new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").setTimeColumnName(timeColumn).build();
+
+    // Test null time value with valid default time in epoch
+    String epochFormat = "1:DAYS:EPOCH";
+    Schema schema =
+        new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.LONG, epochFormat, "1:DAYS", 12345, null).build();
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
+    assertNotNull(record);
+    assertTrue(record.isNullValue(timeColumn));
+    assertEquals(record.getValue(timeColumn), 12345L);
+
+    // Test null time value without default time in epoch
+    schema = new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.LONG, epochFormat, "1:DAYS").build();
+    long startTimeMs = System.currentTimeMillis();
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
+    long endTimeMs = System.currentTimeMillis();
+    assertNotNull(record);
+    assertTrue(record.isNullValue(timeColumn));
+    assertTrue((long) record.getValue(timeColumn) >= TimeUnit.MILLISECONDS.toDays(startTimeMs)
+        && (long) record.getValue(timeColumn) <= TimeUnit.MILLISECONDS.toDays(endTimeMs));
+
+    // Test null time value with invalid default time in epoch
+    schema = new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.LONG, epochFormat, "1:DAYS", 0, null).build();
+    startTimeMs = System.currentTimeMillis();
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
+    endTimeMs = System.currentTimeMillis();
+    assertNotNull(record);
+    assertTrue(record.isNullValue(timeColumn));
+    assertTrue((long) record.getValue(timeColumn) >= TimeUnit.MILLISECONDS.toDays(startTimeMs)
+        && (long) record.getValue(timeColumn) <= TimeUnit.MILLISECONDS.toDays(endTimeMs));
+
+    // Test null time value with valid default time in SDF
+    String sdfFormat = "1:DAYS:SIMPLE_DATE_FORMAT:yyyy-MM-dd";
+    schema =
+        new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.STRING, sdfFormat, "1:DAYS", "2020-02-02", null)
             .build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
     assertNotNull(record);
-    assertNull(record.getValue(columnInTimeType));
-    assertFalse(record.isNullValue(columnInTimeType));
-    assertEquals(record.getValue(columnInDateTimeType), FieldSpec.DEFAULT_DIMENSION_NULL_VALUE_OF_STRING);
-    assertTrue(record.isNullValue(columnInDateTimeType));
-    // Set time column to be columnInDateTimeType, so the expected value is null.
-    // The value in columnInTimeType will be filled with default value based on data type.
-    tableConfig =
-        new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").setTimeColumnName(columnInDateTimeType)
-            .build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
-    assertNotNull(record);
-    assertNull(record.getValue(columnInDateTimeType));
-    assertFalse(record.isNullValue(columnInDateTimeType));
-    assertEquals(record.getValue(columnInTimeType), FieldSpec.DEFAULT_DIMENSION_NULL_VALUE_OF_LONG);
-    assertTrue(record.isNullValue(columnInTimeType));
-    // columnInTimeType and columnInDateTimeType will be filled with default value based on data type if table config
-    // doesn't have time
-    // column specified
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
-    assertNotNull(record);
-    assertEquals(record.getValue(columnInDateTimeType), FieldSpec.DEFAULT_DIMENSION_NULL_VALUE_OF_STRING);
-    assertTrue(record.isNullValue(columnInDateTimeType));
-    assertEquals(record.getValue(columnInTimeType), FieldSpec.DEFAULT_DIMENSION_NULL_VALUE_OF_LONG);
-    assertTrue(record.isNullValue(columnInTimeType));
+    assertTrue(record.isNullValue(timeColumn));
+    assertEquals(record.getValue(timeColumn), "2020-02-02");
 
-    // test time column null handling enabled, with long type, epoch seconds unit.
-    long startTime = System.currentTimeMillis();
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").setAllowNullTimeValue(true)
-        .setTimeColumnName(columnInTimeType).build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
+    // Test null time value without default time in SDF
+    schema = new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.STRING, sdfFormat, "1:DAYS").build();
+    startTimeMs = System.currentTimeMillis();
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
+    endTimeMs = System.currentTimeMillis();
     assertNotNull(record);
-    assertTrue(record.getValue(columnInTimeType) instanceof Long);
-    long endTime = System.currentTimeMillis();
-    assertTrue((long) record.getValue(columnInTimeType) >= TimeUnit.MILLISECONDS.toSeconds(startTime)
-        && (long) record.getValue(columnInTimeType) <= TimeUnit.MILLISECONDS.toSeconds(endTime));
-    assertTrue(record.isNullValue(columnInTimeType));
+    assertTrue(record.isNullValue(timeColumn));
+    DateTimeFormatSpec dateTimeFormatSpec = new DateTimeFormatSpec(sdfFormat);
+    assertTrue(((String) record.getValue(timeColumn)).compareTo(dateTimeFormatSpec.fromMillisToFormat(startTimeMs)) >= 0
+        && ((String) record.getValue(timeColumn)).compareTo(dateTimeFormatSpec.fromMillisToFormat(endTimeMs)) <= 0);
 
-    // test time column null handling enabled, with string type, 5 MINUTES as time granularity.
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName("testTable").setAllowNullTimeValue(true)
-        .setTimeColumnName(columnInDateTimeType).build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
+    // Test null time value with invalid default time in SDF
+    schema =
+        new Schema.SchemaBuilder().addDateTime(timeColumn, DataType.STRING, sdfFormat, "1:DAYS", 12345, null).build();
+    transformer = new NullValueTransformer(tableConfig, schema);
+    record = transformer.transform(new GenericRow());
     assertNotNull(record);
-    assertTrue(record.getValue(columnInDateTimeType) instanceof String);
-    long timeValue = Long.parseLong((String) record.getValue(columnInDateTimeType));
-    endTime = System.currentTimeMillis();
-    DateTimeFormatSpec dateTimeFormatSpec = new DateTimeFormatSpec(dateTimeFormat);
-    long startTimeValue = Long.parseLong(dateTimeFormatSpec.fromMillisToFormat(startTime));
-    long endTimeValue = Long.parseLong(dateTimeFormatSpec.fromMillisToFormat(endTime));
-    assertTrue(timeValue >= startTimeValue && timeValue <= endTimeValue);
-    assertTrue(record.isNullValue(columnInDateTimeType));
-
-    // test time column null handling enabled, with integer type, with a yyyyMMdd pattern.
-    dateTimeFormat = "1:DAYS:SIMPLE_DATE_FORMAT:yyyyMMdd";
-    schemaWithTimeColumn =
-        new Schema.SchemaBuilder().addDateTime(columnInDateTimeType, DataType.INT, dateTimeFormat, "5:MINUTES").build();
-    record = new GenericRow();
-    transformer = new NullValueTransformer(tableConfig, schemaWithTimeColumn);
-    record = transformer.transform(record);
-    assertNotNull(record);
-    assertTrue(record.getValue(columnInDateTimeType) instanceof Integer);
-    timeValue = (int) record.getValue(columnInDateTimeType);
-    endTime = System.currentTimeMillis();
-    dateTimeFormatSpec = new DateTimeFormatSpec(dateTimeFormat);
-    startTimeValue = Integer.parseInt(dateTimeFormatSpec.fromMillisToFormat(startTime));
-    endTimeValue = Integer.parseInt(dateTimeFormatSpec.fromMillisToFormat(endTime));
-    assertTrue(timeValue >= startTimeValue && timeValue <= endTimeValue);
-    assertTrue(record.isNullValue(columnInDateTimeType));
+    assertTrue(record.isNullValue(timeColumn));
+    dateTimeFormatSpec = new DateTimeFormatSpec(sdfFormat);
+    assertTrue(((String) record.getValue(timeColumn)).compareTo(dateTimeFormatSpec.fromMillisToFormat(startTimeMs)) >= 0
+        && ((String) record.getValue(timeColumn)).compareTo(dateTimeFormatSpec.fromMillisToFormat(endTimeMs)) <= 0);
   }
 
   private void validateNullValueTransformerResult(GenericRow record) {

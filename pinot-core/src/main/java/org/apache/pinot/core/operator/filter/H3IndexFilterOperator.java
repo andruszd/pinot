@@ -27,6 +27,7 @@ import java.util.Set;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.predicate.Predicate;
 import org.apache.pinot.common.request.context.predicate.RangePredicate;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.blocks.FilterBlock;
 import org.apache.pinot.core.operator.dociditerators.ScanBasedDocIdIterator;
 import org.apache.pinot.core.operator.docidsets.BitmapDocIdSet;
@@ -45,8 +46,8 @@ import org.roaringbitmap.buffer.MutableRoaringBitmap;
  * A filter operator that uses H3 index for geospatial data retrieval
  */
 public class H3IndexFilterOperator extends BaseFilterOperator {
-  private static final String OPERATOR_NAME = "H3IndexFilterOperator";
 
+  private static final String EXPLAIN_NAME = "FILTER_H3_INDEX";
   private final IndexSegment _segment;
   private final Predicate _predicate;
   private final int _numDocs;
@@ -66,10 +67,12 @@ public class H3IndexFilterOperator extends BaseFilterOperator {
     Coordinate coordinate;
     if (arguments.get(0).getType() == ExpressionContext.Type.IDENTIFIER) {
       _h3IndexReader = segment.getDataSource(arguments.get(0).getIdentifier()).getH3Index();
-      coordinate = GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(1).getLiteral())).getCoordinate();
+      coordinate =
+          GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(1).getLiteralString())).getCoordinate();
     } else {
       _h3IndexReader = segment.getDataSource(arguments.get(1).getIdentifier()).getH3Index();
-      coordinate = GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(0).getLiteral())).getCoordinate();
+      coordinate =
+          GeometrySerializer.deserialize(BytesUtils.toBytes(arguments.get(0).getLiteralString())).getCoordinate();
     }
     assert _h3IndexReader != null;
     int resolution = _h3IndexReader.getH3IndexResolution().getLowestResolution();
@@ -239,8 +242,17 @@ public class H3IndexFilterOperator extends BaseFilterOperator {
     });
   }
 
+
   @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
+  public List<Operator> getChildOperators() {
+    return Collections.emptyList();
+  }
+
+  @Override
+  public String toExplainString() {
+    StringBuilder stringBuilder = new StringBuilder(EXPLAIN_NAME).append("(indexLookUp:h3_index");
+    stringBuilder.append(",operator:").append(_predicate.getType());
+    stringBuilder.append(",predicate:").append(_predicate.toString());
+    return stringBuilder.append(')').toString();
   }
 }

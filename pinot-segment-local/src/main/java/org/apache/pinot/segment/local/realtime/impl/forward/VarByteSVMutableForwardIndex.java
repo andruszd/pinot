@@ -19,10 +19,12 @@
 package org.apache.pinot.segment.local.realtime.impl.forward;
 
 import java.io.IOException;
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
+import java.math.BigDecimal;
 import org.apache.pinot.segment.local.io.writer.impl.MutableOffHeapByteArrayStore;
-import org.apache.pinot.segment.spi.index.reader.MutableForwardIndex;
+import org.apache.pinot.segment.spi.index.mutable.MutableForwardIndex;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.BigDecimalUtils;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -31,14 +33,14 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * Single-value forward index reader-writer for variable length values (STRING and BYTES).
  */
 public class VarByteSVMutableForwardIndex implements MutableForwardIndex {
-  private final DataType _valueType;
+  private final DataType _storedType;
   private final MutableOffHeapByteArrayStore _byteArrayStore;
   private int _lengthOfShortestElement;
   private int _lengthOfLongestElement;
 
-  public VarByteSVMutableForwardIndex(DataType valueType, PinotDataBufferMemoryManager memoryManager,
+  public VarByteSVMutableForwardIndex(DataType storedType, PinotDataBufferMemoryManager memoryManager,
       String allocationContext, int estimatedMaxNumberOfValues, int estimatedAverageStringLength) {
-    _valueType = valueType;
+    _storedType = storedType;
     _byteArrayStore = new MutableOffHeapByteArrayStore(memoryManager, allocationContext, estimatedMaxNumberOfValues,
         estimatedAverageStringLength);
     _lengthOfShortestElement = Integer.MAX_VALUE;
@@ -56,8 +58,8 @@ public class VarByteSVMutableForwardIndex implements MutableForwardIndex {
   }
 
   @Override
-  public DataType getValueType() {
-    return _valueType;
+  public DataType getStoredType() {
+    return _storedType;
   }
 
   @Override
@@ -71,6 +73,11 @@ public class VarByteSVMutableForwardIndex implements MutableForwardIndex {
   }
 
   @Override
+  public BigDecimal getBigDecimal(int docId) {
+    return BigDecimalUtils.deserialize(_byteArrayStore.get(docId));
+  }
+
+  @Override
   public String getString(int docId) {
     return new String(_byteArrayStore.get(docId), UTF_8);
   }
@@ -78,6 +85,11 @@ public class VarByteSVMutableForwardIndex implements MutableForwardIndex {
   @Override
   public byte[] getBytes(int docId) {
     return _byteArrayStore.get(docId);
+  }
+
+  @Override
+  public void setBigDecimal(int docId, BigDecimal value) {
+    setBytes(docId, BigDecimalUtils.serialize(value));
   }
 
   @Override

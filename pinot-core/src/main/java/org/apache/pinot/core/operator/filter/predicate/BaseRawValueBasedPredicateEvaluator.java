@@ -18,7 +18,15 @@
  */
 package org.apache.pinot.core.operator.filter.predicate;
 
+import java.math.BigDecimal;
+import org.apache.pinot.common.request.context.predicate.Predicate;
+
+
 public abstract class BaseRawValueBasedPredicateEvaluator extends BasePredicateEvaluator {
+
+  protected BaseRawValueBasedPredicateEvaluator(Predicate predicate) {
+    super(predicate);
+  }
 
   @Override
   public final boolean isDictionaryBased() {
@@ -156,6 +164,11 @@ public abstract class BaseRawValueBasedPredicateEvaluator extends BasePredicateE
       }
       return false;
     }
+  }
+
+  @Override
+  public boolean applySV(BigDecimal value) {
+    throw new UnsupportedOperationException();
   }
 
   @Override

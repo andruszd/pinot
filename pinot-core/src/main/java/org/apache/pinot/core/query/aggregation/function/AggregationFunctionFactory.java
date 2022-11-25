@@ -52,6 +52,9 @@ public class AggregationFunctionFactory {
       ExpressionContext firstArgument = arguments.get(0);
       if (upperCaseFunctionName.startsWith("PERCENTILE")) {
         String remainingFunctionName = upperCaseFunctionName.substring(10);
+        if (remainingFunctionName.equals("SMARTTDIGEST")) {
+          return new PercentileSmartTDigestAggregationFunction(arguments);
+        }
         int numArguments = arguments.size();
         if (numArguments == 1) {
           // Single argument percentile (e.g. Percentile99(foo), PercentileTDigest95(bar), etc.)
@@ -98,7 +101,8 @@ public class AggregationFunctionFactory {
         } else if (numArguments == 2) {
           // Double arguments percentile (e.g. percentile(foo, 99), percentileTDigest(bar, 95), etc.) where the
           // second argument is a decimal number from 0.0 to 100.0.
-          double percentile = parsePercentileToDouble(arguments.get(1).getLiteral());
+          // Have to use literal string because we need to cast int to double here.
+          double percentile = parsePercentileToDouble(arguments.get(1).getLiteralString());
           if (remainingFunctionName.isEmpty()) {
             // Percentile
             return new PercentileAggregationFunction(firstArgument, percentile);
@@ -144,19 +148,49 @@ public class AggregationFunctionFactory {
       } else {
         switch (AggregationFunctionType.valueOf(upperCaseFunctionName)) {
           case COUNT:
-            return new CountAggregationFunction();
+            return new CountAggregationFunction(firstArgument, queryContext.isNullHandlingEnabled());
           case MIN:
-            return new MinAggregationFunction(firstArgument);
+            return new MinAggregationFunction(firstArgument, queryContext.isNullHandlingEnabled());
           case MAX:
-            return new MaxAggregationFunction(firstArgument);
+            return new MaxAggregationFunction(firstArgument, queryContext.isNullHandlingEnabled());
           case SUM:
-            return new SumAggregationFunction(firstArgument);
+            return new SumAggregationFunction(firstArgument, queryContext.isNullHandlingEnabled());
           case SUMPRECISION:
-            return new SumPrecisionAggregationFunction(arguments);
+            return new SumPrecisionAggregationFunction(arguments, queryContext.isNullHandlingEnabled());
           case AVG:
-            return new AvgAggregationFunction(firstArgument);
+            return new AvgAggregationFunction(firstArgument, queryContext.isNullHandlingEnabled());
           case MODE:
             return new ModeAggregationFunction(arguments);
+          case FIRSTWITHTIME:
+            if (arguments.size() == 3) {
+              ExpressionContext timeCol = arguments.get(1);
+              ExpressionContext dataType = arguments.get(2);
+              if (dataType.getType() != ExpressionContext.Type.LITERAL) {
+                throw new IllegalArgumentException("Third argument of firstWithTime Function should be literal."
+                    + " The function can be used as firstWithTime(dataColumn, timeColumn, 'dataType')");
+              }
+              FieldSpec.DataType fieldDataType
+                  = FieldSpec.DataType.valueOf(dataType.getLiteralString().toUpperCase());
+              switch (fieldDataType) {
+                case BOOLEAN:
+                case INT:
+                  return new FirstIntValueWithTimeAggregationFunction(
+                      firstArgument, timeCol, fieldDataType == FieldSpec.DataType.BOOLEAN);
+                case LONG:
+                  return new FirstLongValueWithTimeAggregationFunction(firstArgument, timeCol);
+                case FLOAT:
+                  return new FirstFloatValueWithTimeAggregationFunction(firstArgument, timeCol);
+                case DOUBLE:
+                  return new FirstDoubleValueWithTimeAggregationFunction(firstArgument, timeCol);
+                case STRING:
+                  return new FirstStringValueWithTimeAggregationFunction(firstArgument, timeCol);
+                default:
+                  throw new IllegalArgumentException("Unsupported Value Type for firstWithTime Function:" + dataType);
+              }
+            } else {
+              throw new IllegalArgumentException("Three arguments are required for firstWithTime Function."
+                  + " The function can be used as firstWithTime(dataColumn, timeColumn, 'dataType')");
+            }
           case LASTWITHTIME:
             if (arguments.size() == 3) {
               ExpressionContext timeCol = arguments.get(1);
@@ -165,13 +199,12 @@ public class AggregationFunctionFactory {
                 throw new IllegalArgumentException("Third argument of lastWithTime Function should be literal."
                     + " The function can be used as lastWithTime(dataColumn, timeColumn, 'dataType')");
               }
-              FieldSpec.DataType fieldDataType
-                  = FieldSpec.DataType.valueOf(dataType.getLiteral().toUpperCase());
+              FieldSpec.DataType fieldDataType = FieldSpec.DataType.valueOf(dataType.getLiteralString().toUpperCase());
               switch (fieldDataType) {
                 case BOOLEAN:
                 case INT:
-                  return new LastIntValueWithTimeAggregationFunction(
-                      firstArgument, timeCol, fieldDataType == FieldSpec.DataType.BOOLEAN);
+                  return new LastIntValueWithTimeAggregationFunction(firstArgument, timeCol,
+                      fieldDataType == FieldSpec.DataType.BOOLEAN);
                 case LONG:
                   return new LastLongValueWithTimeAggregationFunction(firstArgument, timeCol);
                 case FLOAT:
@@ -199,6 +232,8 @@ public class AggregationFunctionFactory {
             return new DistinctCountHLLAggregationFunction(arguments);
           case DISTINCTCOUNTRAWHLL:
             return new DistinctCountRawHLLAggregationFunction(arguments);
+          case DISTINCTCOUNTSMARTHLL:
+            return new DistinctCountSmartHLLAggregationFunction(arguments);
           case FASTHLL:
             return new FastHLLAggregationFunction(firstArgument);
           case DISTINCTCOUNTTHETASKETCH:
@@ -232,12 +267,19 @@ public class AggregationFunctionFactory {
                 queryContext.getLimit());
           case STUNION:
             return new StUnionAggregationFunction(firstArgument);
+          case HISTOGRAM:
+            return new HistogramAggregationFunction(arguments);
+          case COVARPOP:
+            return new CovarianceAggregationFunction(arguments, false);
+          case COVARSAMP:
+            return new CovarianceAggregationFunction(arguments, true);
           default:
             throw new IllegalArgumentException();
         }
       }
     } catch (Exception e) {
-      throw new BadQueryRequestException("Invalid aggregation function: " + function);
+      throw new BadQueryRequestException(
+          "Invalid aggregation function: " + function + "; Reason: " + e.getMessage());
     }
   }
 

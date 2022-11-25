@@ -20,20 +20,26 @@ package org.apache.pinot.core.transport;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
+import io.netty.channel.epoll.EpollServerSocketChannel;
+import io.netty.channel.kqueue.KQueue;
+import io.netty.channel.kqueue.KQueueEventLoopGroup;
+import io.netty.channel.kqueue.KQueueServerSocketChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
-import io.netty.handler.codec.LengthFieldPrepender;
-import io.netty.handler.ssl.ClientAuth;
-import io.netty.handler.ssl.SslContextBuilder;
 import java.util.concurrent.TimeUnit;
-import org.apache.pinot.common.metrics.ServerMetrics;
-import org.apache.pinot.core.query.scheduler.QueryScheduler;
-import org.apache.pinot.core.util.TlsUtils;
+import org.apache.pinot.common.config.NettyConfig;
+import org.apache.pinot.common.config.TlsConfig;
+import org.apache.pinot.core.util.OsCheck;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -41,87 +47,93 @@ import org.apache.pinot.core.util.TlsUtils;
  * Brokers.
  */
 public class QueryServer {
+  private static final Logger LOGGER = LoggerFactory.getLogger(QueryServer.class);
   private final int _port;
-  private final QueryScheduler _queryScheduler;
-  private final ServerMetrics _serverMetrics;
   private final TlsConfig _tlsConfig;
 
-  private EventLoopGroup _bossGroup;
-  private EventLoopGroup _workerGroup;
+  private final EventLoopGroup _bossGroup;
+  private final EventLoopGroup _workerGroup;
+  private final Class<? extends ServerSocketChannel> _channelClass;
+  private final ChannelHandler _instanceRequestHandler;
   private Channel _channel;
 
   /**
    * Create an unsecured server instance
    *
    * @param port bind port
-   * @param queryScheduler query scheduler
-   * @param serverMetrics server metrics
+   * @param nettyConfig configurations for netty library
    */
-  public QueryServer(int port, QueryScheduler queryScheduler, ServerMetrics serverMetrics) {
-    this(port, queryScheduler, serverMetrics, null);
+  public QueryServer(int port, NettyConfig nettyConfig, ChannelHandler instanceRequestHandler) {
+    this(port, nettyConfig, null, instanceRequestHandler);
   }
 
   /**
    * Create a server instance with TLS config
    *
    * @param port bind port
-   * @param queryScheduler query scheduler
-   * @param serverMetrics server metrics
+   * @param nettyConfig configurations for netty library
    * @param tlsConfig TLS/SSL config
    */
-  public QueryServer(int port, QueryScheduler queryScheduler, ServerMetrics serverMetrics, TlsConfig tlsConfig) {
+  public QueryServer(int port, NettyConfig nettyConfig, TlsConfig tlsConfig, ChannelHandler instanceRequestHandler) {
     _port = port;
-    _queryScheduler = queryScheduler;
-    _serverMetrics = serverMetrics;
     _tlsConfig = tlsConfig;
+    _instanceRequestHandler = instanceRequestHandler;
+
+    boolean enableNativeTransports = nettyConfig != null && nettyConfig.isNativeTransportsEnabled();
+    OsCheck.OSType operatingSystemType = OsCheck.getOperatingSystemType();
+    if (enableNativeTransports
+        && operatingSystemType == OsCheck.OSType.Linux
+        && Epoll.isAvailable()) {
+      _bossGroup = new EpollEventLoopGroup();
+      _workerGroup = new EpollEventLoopGroup();
+      _channelClass = EpollServerSocketChannel.class;
+      LOGGER.info("Using Epoll event loop");
+    } else if (enableNativeTransports
+        && operatingSystemType == OsCheck.OSType.MacOS
+        && KQueue.isAvailable()) {
+      _bossGroup = new KQueueEventLoopGroup();
+      _workerGroup = new KQueueEventLoopGroup();
+      _channelClass = KQueueServerSocketChannel.class;
+      LOGGER.info("Using KQueue event loop");
+    } else {
+      _bossGroup = new NioEventLoopGroup();
+      _workerGroup = new NioEventLoopGroup();
+      _channelClass = NioServerSocketChannel.class;
+      StringBuilder log = new StringBuilder("Using NIO event loop");
+      if (operatingSystemType == OsCheck.OSType.Linux
+          && enableNativeTransports) {
+        log.append(", as Epoll is not available: ").append(Epoll.unavailabilityCause());
+      } else if (operatingSystemType == OsCheck.OSType.MacOS
+          && enableNativeTransports) {
+        log.append(", as KQueue is not available: ").append(KQueue.unavailabilityCause());
+      }
+      LOGGER.info(log.toString());
+    }
   }
 
   public void start() {
-    _bossGroup = new NioEventLoopGroup();
-    _workerGroup = new NioEventLoopGroup();
     try {
       ServerBootstrap serverBootstrap = new ServerBootstrap();
-      _channel = serverBootstrap.group(_bossGroup, _workerGroup).channel(NioServerSocketChannel.class)
+      _channel = serverBootstrap.group(_bossGroup, _workerGroup).channel(_channelClass)
           .option(ChannelOption.SO_BACKLOG, 128).childOption(ChannelOption.SO_KEEPALIVE, true)
           .childHandler(new ChannelInitializer<SocketChannel>() {
             @Override
             protected void initChannel(SocketChannel ch) {
               if (_tlsConfig != null) {
-                attachSSLHandler(ch);
+                // Add SSL handler first to encrypt and decrypt everything.
+                ch.pipeline()
+                    .addLast(ChannelHandlerFactory.SSL, ChannelHandlerFactory.getServerTlsHandler(_tlsConfig, ch));
               }
 
-              ch.pipeline()
-                  .addLast(new LengthFieldBasedFrameDecoder(Integer.MAX_VALUE, 0, Integer.BYTES, 0, Integer.BYTES),
-                      new LengthFieldPrepender(Integer.BYTES),
-                      new InstanceRequestHandler(_queryScheduler, _serverMetrics));
+              ch.pipeline().addLast(ChannelHandlerFactory.getLengthFieldBasedFrameDecoder());
+              ch.pipeline().addLast(ChannelHandlerFactory.getLengthFieldPrepender());
+              ch.pipeline().addLast(_instanceRequestHandler);
             }
           }).bind(_port).sync().channel();
     } catch (Exception e) {
       // Shut down immediately
       _workerGroup.shutdownGracefully(0, 0, TimeUnit.SECONDS);
       _bossGroup.shutdownGracefully(0, 0, TimeUnit.SECONDS);
-      throw new RuntimeException(e);
-    }
-  }
-
-  private void attachSSLHandler(SocketChannel ch) {
-    try {
-      if (_tlsConfig.getKeyStorePath() == null) {
-        throw new IllegalArgumentException("Must provide key store path for secured server");
-      }
-
-      SslContextBuilder sslContextBuilder = SslContextBuilder.forServer(TlsUtils.createKeyManagerFactory(_tlsConfig));
-
-      if (_tlsConfig.getTrustStorePath() != null) {
-        sslContextBuilder.trustManager(TlsUtils.createTrustManagerFactory(_tlsConfig));
-      }
-
-      if (_tlsConfig.isClientAuthEnabled()) {
-        sslContextBuilder.clientAuth(ClientAuth.REQUIRE);
-      }
-
-      ch.pipeline().addLast("ssl", sslContextBuilder.build().newHandler(ch.alloc()));
-    } catch (Exception e) {
       throw new RuntimeException(e);
     }
   }

@@ -32,7 +32,7 @@ import java.util.Set;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.segment.local.loader.LocalSegmentDirectoryLoader;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.converter.SegmentFormatConverter;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
@@ -125,8 +125,8 @@ public class SegmentV1V2ToV3FormatConverter implements SegmentFormatConverter {
 
   private void setDirectoryPermissions(File v3Directory)
       throws IOException {
-    EnumSet<PosixFilePermission> permissions = EnumSet
-        .of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE,
+    EnumSet<PosixFilePermission> permissions =
+        EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE,
             PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE,
             PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_EXECUTE);
     try {
@@ -139,12 +139,14 @@ public class SegmentV1V2ToV3FormatConverter implements SegmentFormatConverter {
   private void copyIndexData(File v2Directory, SegmentMetadataImpl v2Metadata, File v3Directory)
       throws Exception {
     Map<String, Object> props = new HashMap<>();
-    props.put(LocalSegmentDirectoryLoader.READ_MODE_KEY, ReadMode.mmap.toString());
+    props.put(IndexLoadingConfig.READ_MODE_KEY, ReadMode.mmap.toString());
     PinotConfiguration configuration = new PinotConfiguration(props);
-    try (SegmentDirectory v2Segment = SegmentDirectoryLoaderRegistry.getLocalSegmentDirectoryLoader()
-        .load(v2Directory.toURI(), new SegmentDirectoryLoaderContext(null, null, configuration));
-        SegmentDirectory v3Segment = SegmentDirectoryLoaderRegistry.getLocalSegmentDirectoryLoader()
-            .load(v3Directory.toURI(), new SegmentDirectoryLoaderContext(null, null, configuration))) {
+    try (SegmentDirectory v2Segment = SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader()
+        .load(v2Directory.toURI(), new SegmentDirectoryLoaderContext.Builder().setSegmentName(v2Metadata.getName())
+            .setSegmentDirectoryConfigs(configuration).build());
+        SegmentDirectory v3Segment = SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader()
+            .load(v3Directory.toURI(), new SegmentDirectoryLoaderContext.Builder().setSegmentName(v2Metadata.getName())
+                .setSegmentDirectoryConfigs(configuration).build())) {
 
       // for each dictionary and each fwdIndex, copy that to newDirectory buffer
       Set<String> allColumns = v2Metadata.getAllColumns();
@@ -161,6 +163,9 @@ public class SegmentV1V2ToV3FormatConverter implements SegmentFormatConverter {
           copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.INVERTED_INDEX);
           copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.FST_INDEX);
           copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.JSON_INDEX);
+          copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.H3_INDEX);
+          copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.RANGE_INDEX);
+          copyIndexIfExists(v2DataReader, v3DataWriter, column, ColumnIndexType.BLOOM_FILTER);
         }
 
         v3DataWriter.save();

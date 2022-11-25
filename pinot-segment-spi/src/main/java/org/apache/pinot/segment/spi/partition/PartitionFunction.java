@@ -19,6 +19,8 @@
 package org.apache.pinot.segment.spi.partition;
 
 import java.io.Serializable;
+import java.util.Map;
+import javax.annotation.Nullable;
 
 
 /**
@@ -29,6 +31,7 @@ import java.io.Serializable;
  * with the same value are expected to produce the same result.
  */
 public interface PartitionFunction extends Serializable {
+
   /**
    * Method to compute and return partition id for the given value.
    *
@@ -38,8 +41,19 @@ public interface PartitionFunction extends Serializable {
   int getPartition(Object value);
 
   /**
+   * Returns the name of the partition function.
+   * @return Name of the partition function.
+   */
+  String getName();
+
+  /**
    * Returns the total number of possible partitions.
    * @return Number of possible partitions.
    */
   int getNumPartitions();
+
+  @Nullable
+  default Map<String, String> getFunctionConfig() {
+    return null;
+  }
 }

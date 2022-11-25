@@ -26,9 +26,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.LongAccumulator;
-import javax.annotation.Nonnull;
 import org.apache.pinot.common.exception.QueryException;
-import org.apache.pinot.common.metrics.ServerMeter;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.common.metrics.ServerQueryPhase;
 import org.apache.pinot.core.query.executor.QueryExecutor;
@@ -54,9 +52,8 @@ public abstract class PriorityScheduler extends QueryScheduler {
   @VisibleForTesting
   Thread _scheduler;
 
-  public PriorityScheduler(@Nonnull PinotConfiguration config, @Nonnull ResourceManager resourceManager,
-      @Nonnull QueryExecutor queryExecutor, @Nonnull SchedulerPriorityQueue queue, @Nonnull ServerMetrics metrics,
-      @Nonnull LongAccumulator latestQueryTime) {
+  public PriorityScheduler(PinotConfiguration config, ResourceManager resourceManager, QueryExecutor queryExecutor,
+      SchedulerPriorityQueue queue, ServerMetrics metrics, LongAccumulator latestQueryTime) {
     super(config, queryExecutor, resourceManager, metrics, latestQueryTime);
     Preconditions.checkNotNull(queue);
     _queryQueue = queue;
@@ -64,9 +61,8 @@ public abstract class PriorityScheduler extends QueryScheduler {
     _runningQueriesSemaphore = new Semaphore(_numRunners);
   }
 
-  @Nonnull
   @Override
-  public ListenableFuture<byte[]> submit(@Nonnull ServerQueryRequest queryRequest) {
+  public ListenableFuture<byte[]> submit(ServerQueryRequest queryRequest) {
     if (!_isRunning) {
       return immediateErrorResponse(queryRequest, QueryException.SERVER_SCHEDULER_DOWN_ERROR);
     }
@@ -78,7 +74,6 @@ public abstract class PriorityScheduler extends QueryScheduler {
       LOGGER.error("Out of capacity for table {}, message: {}", queryRequest.getTableNameWithType(), e.getMessage());
       return immediateErrorResponse(queryRequest, QueryException.SERVER_OUT_OF_CAPACITY_ERROR);
     }
-    _serverMetrics.addMeteredTableValue(queryRequest.getTableNameWithType(), ServerMeter.QUERIES, 1);
     return schedQueryContext.getResultFuture();
   }
 

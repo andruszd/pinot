@@ -25,7 +25,7 @@
   <parent>
     <artifactId>pinot</artifactId>
     <groupId>org.apache.pinot</groupId>
-    <version>0.9.0-SNAPSHOT</version>
+    <version>0.12.0-SNAPSHOT</version>
     <relativePath>..</relativePath>
   </parent>
   <artifactId>pinot-distribution</artifactId>
@@ -63,6 +63,14 @@
     <dependency>
       <groupId>org.apache.pinot</groupId>
       <artifactId>pinot-controller</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.pinot</groupId>
+      <artifactId>pinot-query-planner</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.pinot</groupId>
+      <artifactId>pinot-query-runtime</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.pinot</groupId>
@@ -109,18 +117,6 @@
     <dependency>
       <groupId>javax.activation</groupId>
       <artifactId>activation</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>javax.xml.bind</groupId>
-      <artifactId>jaxb-api</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.sun.xml.bind</groupId>
-      <artifactId>jaxb-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.sun.xml.bind</groupId>
-      <artifactId>jaxb-impl</artifactId>
     </dependency>
   </dependencies>
   <build>
@@ -173,31 +169,31 @@
               <relocations>
                 <relocation>
                   <pattern>com.google.common</pattern>
-                  <shadedPattern>shaded.com.google.common</shadedPattern>
+                  <shadedPattern>${shade.prefix}.com.google.common</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>com.fasterxml.jackson</pattern>
-                  <shadedPattern>shaded.com.fasterxml.jackson</shadedPattern>
+                  <shadedPattern>${shade.prefix}.com.fasterxml.jackson</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>org.apache.http</pattern>
-                  <shadedPattern>shaded.org.apache.http</shadedPattern>
+                  <shadedPattern>${shade.prefix}.org.apache.http</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>software.amazon</pattern>
-                  <shadedPattern>shaded.software.amazon</shadedPattern>
+                  <shadedPattern>${shade.prefix}.software.amazon</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>org.reflections</pattern>
-                  <shadedPattern>shaded.org.reflections</shadedPattern>
+                  <shadedPattern>${shade.prefix}.org.reflections</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>io.netty</pattern>
-                  <shadedPattern>shaded.io.netty</shadedPattern>
+                  <shadedPattern>${shade.prefix}.io.netty</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>org.apache.parquet</pattern>
-                  <shadedPattern>shaded.org.apache.parquet</shadedPattern>
+                  <shadedPattern>${shade.prefix}.org.apache.parquet</shadedPattern>
                 </relocation>
               </relocations>
             </configuration>
@@ -261,6 +257,43 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-enforcer-plugin</artifactId>
+          </plugin>
+          <!-- Create symlink "build" to the root directory (Unix only) -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>1.5.0</version>
+            <executions>
+              <execution>
+                <id>remove-build-directory</id>
+                <phase>clean</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>rm</executable>
+                  <arguments>
+                    <argument>-f</argument>
+                    <argument>${project.basedir}/../build</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+              <execution>
+                <id>create-build-directory</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>ln</executable>
+                  <arguments>
+                    <argument>-sfn</argument>
+                    <argument>${project.basedir}/target/apache-pinot-${project.version}-bin/apache-pinot-${project.version}-bin</argument>
+                    <argument>${project.basedir}/../build</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+            </executions>
           </plugin>
         </plugins>
       </build>

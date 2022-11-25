@@ -18,7 +18,11 @@
  * under the License.
  */
 
-import _ from 'lodash';
+import React from 'react';
+import ReactDiffViewer, {DiffMethod} from 'react-diff-viewer';
+import { map, isEqual, findIndex, findLast } from 'lodash';
+import app_state from '../app_state';
+import { DISPLAY_SEGMENT_STATUS, SEGMENT_STATUS } from 'Models';
 
 const sortArray = function (sortingArr, keyName, ascendingFlag) {
   if (ascendingFlag) {
@@ -51,7 +55,7 @@ const tableFormat = (data) => {
   rows.forEach((singleRow) => {
     const obj = {};
     singleRow.forEach((val: any, index: number) => {
-      obj[header[index]] = val;
+      obj[header[index]+app_state.columnNameSeparator+index] = val;
     });
     results.push(obj);
   });
@@ -66,14 +70,44 @@ const getSegmentStatus = (idealStateObj, externalViewObj) => {
   const externalSegmentCount = externalSegmentKeys.length;
 
   if (idealSegmentCount !== externalSegmentCount) {
-    return 'Bad';
+    let segmentStatusComponent = (
+        <ReactDiffViewer
+            oldValue={JSON.stringify(idealStateObj, null, 2)}
+            newValue={JSON.stringify(externalViewObj, null, 2)}
+            splitView={true}
+            showDiffOnly={true}
+            leftTitle={"Ideal State"}
+            rightTitle={"External View"}
+            compareMethod={DiffMethod.WORDS}
+        />
+    )
+    return {
+      value: 'Bad',
+      tooltip: `Ideal Segment Count: ${idealSegmentCount} does not match external Segment Count: ${externalSegmentCount}`,
+      component: segmentStatusComponent,
+    };
   }
 
-  let segmentStatus = 'Good';
+  let segmentStatus = {value: 'Good', tooltip: null, component: null};
   idealSegmentKeys.map((segmentKey) => {
-    if (segmentStatus === 'Good') {
-      if (!_.isEqual(idealStateObj[segmentKey], externalViewObj[segmentKey])) {
-        segmentStatus = 'Bad';
+    if (segmentStatus.value === 'Good') {
+      if (!isEqual(idealStateObj[segmentKey], externalViewObj[segmentKey])) {
+        let segmentStatusComponent = (
+            <ReactDiffViewer
+                oldValue={JSON.stringify(idealStateObj, null, 2)}
+                newValue={JSON.stringify(externalViewObj, null, 2)}
+                splitView={true}
+                showDiffOnly={true}
+                leftTitle={"Ideal State"}
+                rightTitle={"External View"}
+                compareMethod={DiffMethod.WORDS}
+            />
+        )
+        segmentStatus = {
+          value: 'Bad',
+          tooltip: "Ideal Status does not match external status",
+          component: segmentStatusComponent
+        };
       }
     }
   });
@@ -95,7 +129,7 @@ const generateCodeMirrorOptions = (array, type, modeType?) => {
   const arr = [];
   // eslint-disable-next-line no-shadow
   const nestedFields = (arrayList, type, level, oldObj?) => {
-    _.map(arrayList, (a) => {
+    map(arrayList, (a) => {
       const obj = {
         text: a.displayName || a.name || a,
         displayText: a.displayName || a.name || a,
@@ -129,7 +163,7 @@ const generateCodeMirrorOptions = (array, type, modeType?) => {
       if (oldObj === undefined) {
         arr.push(obj);
       } else {
-        const index = _.findIndex(
+        const index = findIndex(
           arr,
           (n) => n.filterText === oldObj.filterText
         );
@@ -167,7 +201,7 @@ const generateCodeMirrorOptions = (array, type, modeType?) => {
 
 const pushNestedObjectInArray = (pathArr, obj, targetList, modeType) => {
   const rollOverFields = (target) => {
-    _.map(target, (list) => {
+    map(target, (list) => {
       if (pathArr === list.filterText) {
         if (modeType === 'sql') {
           obj.displayText = `${pathArr}.${obj.displayText}`;
@@ -194,7 +228,7 @@ const pushNestedObjectInArray = (pathArr, obj, targetList, modeType) => {
 const getNestedObjPathFromList = (list, obj) => {
   const str = [];
   const recursiveFunc = (arr, level) => {
-    _.map(arr, (a) => {
+    map(arr, (a) => {
       if (a.fields) {
         str.push(a.filterText);
         recursiveFunc(a.fields, level + 1);
@@ -202,7 +236,7 @@ const getNestedObjPathFromList = (list, obj) => {
         str.push(a.filterText);
       }
     });
-    return _.findLast(str);
+    return findLast(str);
   };
   return recursiveFunc(list, 0);
 };
@@ -291,6 +325,55 @@ const encodeString = (str: string) => {
   return str;
 }
 
+const formatBytes = (bytes, decimals = 2) => {
+  if (bytes === 0) return '0 Bytes';
+
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
+const splitStringByLastUnderscore = (str: string) => {
+  if (!str.includes('_')) {
+    return [str, ''];
+  }
+  let beforeUnderscore = str.substring(0, str.lastIndexOf("_"));
+  let afterUnderscore = str.substring(str.lastIndexOf("_") + 1, str.length);
+  return [beforeUnderscore, afterUnderscore];
+}
+
+export const getDisplaySegmentStatus = (idealState, externalView): DISPLAY_SEGMENT_STATUS => {
+  const externalViewStatesArray = Object.values(externalView || {});
+
+  // if EV contains ERROR state then segment is in Bad state
+  if(externalViewStatesArray.includes(SEGMENT_STATUS.ERROR)) {
+    return DISPLAY_SEGMENT_STATUS.BAD;
+  }
+
+  // if EV status is CONSUMING or ONLINE then segment is in Good state
+  if(externalViewStatesArray.every((status) => status === SEGMENT_STATUS.CONSUMING || status === SEGMENT_STATUS.ONLINE)) {
+    return DISPLAY_SEGMENT_STATUS.GOOD;
+  }
+
+  // If EV state is OFFLINE and EV matches IS then segment is in Good state.
+  if(externalViewStatesArray.includes(SEGMENT_STATUS.OFFLINE) && isEqual(idealState, externalView)) {
+    return DISPLAY_SEGMENT_STATUS.GOOD;
+  }
+
+  // If EV is empty or EV state is OFFLINE and does not matches IS then segment is in Partial state.
+  // PARTIAL state can also be interpreted as we're waiting for segments to converge
+  if(externalViewStatesArray.length === 0 || externalViewStatesArray.includes(SEGMENT_STATUS.OFFLINE) && !isEqual(idealState, externalView)) {
+    return DISPLAY_SEGMENT_STATUS.PARTIAL;
+  }
+
+  // does not match any condition -> assume PARTIAL state as we are waiting for segments to converge 
+  return DISPLAY_SEGMENT_STATUS.PARTIAL;
+}
+
 export default {
   sortArray,
   tableFormat,
@@ -300,5 +383,7 @@ export default {
   serialize,
   navigateToPreviousPage,
   syncTableSchemaData,
-  encodeString
+  encodeString,
+  formatBytes,
+  splitStringByLastUnderscore
 };

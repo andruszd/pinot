@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.controller.helix.core.minion.generator.PinotTaskGenerator;
 import org.apache.pinot.minion.executor.PinotTaskExecutor;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -130,7 +131,6 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
       // NOTE: the endpoint is protected implicitly (without annotation) by BasicAuthAccessControlFactory
       sendGetRequest("http://localhost:" + getControllerPort() + "/tables");
     } catch (IOException e) {
-      Assert.assertTrue(e.getMessage().contains("HTTP"));
       Assert.assertTrue(e.getMessage().contains("403"));
     }
   }
@@ -159,7 +159,8 @@ public class BasicAuthBatchIntegrationTest extends ClusterTest {
     IOUtils
         .write(jobFileContents.replaceAll("9000", String.valueOf(getControllerPort())), new FileOutputStream(jobFile));
 
-    new BootstrapTableTool("http", "localhost", getControllerPort(), baseDir.getAbsolutePath(), AUTH_TOKEN).execute();
+    new BootstrapTableTool("http", "localhost", getControllerPort(), baseDir.getAbsolutePath(),
+        AuthProviderUtils.makeAuthProvider(AUTH_TOKEN)).execute();
 
     Thread.sleep(5000);
 

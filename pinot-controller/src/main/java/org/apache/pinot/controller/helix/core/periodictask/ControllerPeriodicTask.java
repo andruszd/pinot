@@ -62,14 +62,16 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
     try {
       // Check if we have a specific table against which this task needs to be run.
       String propTableNameWithType = (String) periodicTaskProperties.get(PeriodicTask.PROPERTY_KEY_TABLE_NAME);
-
       // Process the tables that are managed by this controller
       List<String> tablesToProcess = new ArrayList<>();
+      List<String> nonLeaderForTables = new ArrayList<>();
       if (propTableNameWithType == null) {
         // Table name is not available, so task should run on all tables for which this controller is the lead.
         for (String tableNameWithType : _pinotHelixResourceManager.getAllTables()) {
           if (_leadControllerManager.isLeaderForTable(tableNameWithType)) {
             tablesToProcess.add(tableNameWithType);
+          } else {
+            nonLeaderForTables.add(tableNameWithType);
           }
         }
       } else {
@@ -80,7 +82,10 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
       }
 
       if (!tablesToProcess.isEmpty()) {
-        processTables(tablesToProcess);
+        processTables(tablesToProcess, periodicTaskProperties);
+      }
+      if (!nonLeaderForTables.isEmpty()) {
+        nonLeaderCleanup(nonLeaderForTables);
       }
     } catch (Exception e) {
       LOGGER.error("Caught exception while running task: {}", _taskName, e);
@@ -97,10 +102,10 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
    * <p>
    * Override one of this method, {@link #processTable(String)} or {@link #processTable(String, C)}.
    */
-  protected void processTables(List<String> tableNamesWithType) {
+  protected void processTables(List<String> tableNamesWithType, Properties periodicTaskProperties) {
     int numTables = tableNamesWithType.size();
     LOGGER.info("Processing {} tables in task: {}", numTables, _taskName);
-    C context = preprocess();
+    C context = preprocess(periodicTaskProperties);
     int numTablesProcessed = 0;
     for (String tableNameWithType : tableNamesWithType) {
       if (!isStarted()) {
@@ -111,6 +116,8 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
         processTable(tableNameWithType, context);
       } catch (Exception e) {
         LOGGER.error("Caught exception while processing table: {} in task: {}", tableNameWithType, _taskName, e);
+        _controllerMetrics.addMeteredTableValue(tableNameWithType + "." + _taskName,
+            ControllerMeter.PERIODIC_TASK_ERROR, 1L);
       }
       numTablesProcessed++;
     }
@@ -123,14 +130,14 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
   /**
    * Can be overridden to provide context before processing the tables.
    */
-  protected C preprocess() {
+  protected C preprocess(Properties periodicTaskProperties) {
     return null;
   }
 
   /**
    * Processes the given table.
    * <p>
-   * Override one of this method, {@link #processTable(String)} or {@link #processTables(List)}.
+   * Override one of this method, {@link #processTable(String)} or {@link #processTables(List, Properties)}.
    */
   protected void processTable(String tableNameWithType, C context) {
     processTable(tableNameWithType);
@@ -139,7 +146,7 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
   /**
    * Processes the given table.
    * <p>
-   * Override one of this method, {@link #processTable(String, C)} or {@link #processTables(List)}.
+   * Override one of this method, {@link #processTable(String, C)} or {@link #processTables(List, Properties)}.
    */
   protected void processTable(String tableNameWithType) {
   }
@@ -155,5 +162,13 @@ public abstract class ControllerPeriodicTask<C> extends BasePeriodicTask {
    * Can be overridden to perform cleanups after processing the tables.
    */
   protected void postprocess() {
+  }
+
+  /**
+   * Can be overridden to perform cleanups for tables that the current controller isn't the leader.
+   *
+   * @param tableNamesWithType the table names that the current controller isn't the leader for
+   */
+  protected void nonLeaderCleanup(List<String> tableNamesWithType) {
   }
 }

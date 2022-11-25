@@ -27,9 +27,9 @@ import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
+import org.apache.pinot.common.datatable.DataTable.MetadataKey;
 import org.apache.pinot.common.metadata.segment.SegmentPartitionMetadata;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
-import org.apache.pinot.common.utils.DataTable.MetadataKey;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.segment.spi.partition.metadata.ColumnPartitionMetadata;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
@@ -90,8 +90,8 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
 
     TableConfig tableConfig = createRealtimeTableConfig(_avroFiles.get(0));
     IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
-    indexingConfig.setSegmentPartitionConfig(
-        new SegmentPartitionConfig(Collections.singletonMap(PARTITION_COLUMN, new ColumnPartitionConfig("murmur", 2))));
+    indexingConfig.setSegmentPartitionConfig(new SegmentPartitionConfig(
+        Collections.singletonMap(PARTITION_COLUMN, new ColumnPartitionConfig("murmur", 2))));
     tableConfig.setRoutingConfig(
         new RoutingConfig(null, Collections.singletonList(RoutingConfig.PARTITION_SEGMENT_PRUNER_TYPE), null));
     addTableConfig(tableConfig);
@@ -108,11 +108,6 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
   @Override
   protected long getCountStarResult() {
     return _countStarResult;
-  }
-
-  @Override
-  protected boolean useLlc() {
-    return true;
   }
 
   @Nullable
@@ -191,8 +186,8 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
       assertEquals(response.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), 2);
       assertEquals(responseToCompare.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), 4);
 
-      assertEquals(response.get("aggregationResults").get(0).get("value").asInt(),
-          responseToCompare.get("aggregationResults").get(0).get("value").asInt());
+      assertEquals(response.get("resultTable").get("rows").get(0).get(0).asInt(),
+          responseToCompare.get("resultTable").get("rows").get(0).get(0).asInt());
     }
 
     // Query partition 1
@@ -207,8 +202,8 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
       assertEquals(response.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), 2);
       assertEquals(responseToCompare.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), 4);
 
-      assertEquals(response.get("aggregationResults").get(0).get("value").asInt(),
-          responseToCompare.get("aggregationResults").get(0).get("value").asInt());
+      assertEquals(response.get("resultTable").get("rows").get(0).get(0).asInt(),
+          responseToCompare.get("resultTable").get("rows").get(0).get(0).asInt());
     }
   }
 
@@ -355,8 +350,8 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
       assertEquals(responseToCompare.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), numSegments);
 
       // The result should match again after all the segments with the non-partitioning records are committed
-      assertEquals(response.get("aggregationResults").get(0).get("value").asInt(),
-          responseToCompare.get("aggregationResults").get(0).get("value").asInt());
+      assertEquals(response.get("resultTable").get("rows").get(0).get(0).asInt(),
+          responseToCompare.get("resultTable").get("rows").get(0).get(0).asInt());
     }
 
     // Query partition 1
@@ -372,8 +367,8 @@ public class SegmentPartitionLLCRealtimeClusterIntegrationTest extends BaseClust
       assertEquals(responseToCompare.get(MetadataKey.NUM_SEGMENTS_QUERIED.getName()).asInt(), numSegments);
 
       // The result should match again after all the segments with the non-partitioning records are committed
-      assertEquals(response.get("aggregationResults").get(0).get("value").asInt(),
-          responseToCompare.get("aggregationResults").get(0).get("value").asInt());
+      assertEquals(response.get("resultTable").get("rows").get(0).get(0).asInt(),
+          responseToCompare.get("resultTable").get("rows").get(0).get(0).asInt());
     }
   }
 

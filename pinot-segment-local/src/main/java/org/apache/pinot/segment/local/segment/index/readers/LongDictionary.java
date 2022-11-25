@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.segment.local.segment.index.readers;
 
+import java.math.BigDecimal;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
@@ -29,13 +30,18 @@ public class LongDictionary extends BaseImmutableDictionary {
   }
 
   @Override
-  public int insertionIndexOf(String stringValue) {
-    return binarySearch(Long.parseLong(stringValue));
+  public DataType getValueType() {
+    return DataType.LONG;
   }
 
   @Override
-  public DataType getValueType() {
-    return DataType.LONG;
+  public int indexOf(long longValue) {
+    return normalizeIndex(binarySearch(longValue));
+  }
+
+  @Override
+  public int insertionIndexOf(String stringValue) {
+    return binarySearch(Long.parseLong(stringValue));
   }
 
   @Override
@@ -61,6 +67,11 @@ public class LongDictionary extends BaseImmutableDictionary {
   @Override
   public double getDoubleValue(int dictId) {
     return getLong(dictId);
+  }
+
+  @Override
+  public BigDecimal getBigDecimalValue(int dictId) {
+    return BigDecimal.valueOf(getLong(dictId));
   }
 
   @Override

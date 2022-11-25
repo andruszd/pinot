@@ -19,12 +19,16 @@
 package org.apache.pinot.core.operator;
 
 import com.google.common.base.Preconditions;
+import java.util.Collections;
+import java.util.List;
 import org.apache.pinot.core.common.BlockDocIdIterator;
+import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.blocks.DocIdSetBlock;
 import org.apache.pinot.core.operator.docidsets.FilterBlockDocIdSet;
 import org.apache.pinot.core.operator.filter.BaseFilterOperator;
 import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.segment.spi.Constants;
+import org.apache.pinot.spi.trace.Tracing;
 
 
 /**
@@ -33,7 +37,7 @@ import org.apache.pinot.segment.spi.Constants;
  * matched documents) or already gathered enough documents (for selection queries).
  */
 public class DocIdSetOperator extends BaseOperator<DocIdSetBlock> {
-  private static final String OPERATOR_NAME = "DocIdSetOperator";
+  private static final String EXPLAIN_NAME = "DOC_ID_SET";
 
   private static final ThreadLocal<int[]> THREAD_LOCAL_DOC_IDS =
       ThreadLocal.withInitial(() -> new int[DocIdSetPlanNode.MAX_DOC_PER_CALL]);
@@ -57,11 +61,14 @@ public class DocIdSetOperator extends BaseOperator<DocIdSetBlock> {
       return null;
     }
 
+
     // Initialize filter block document Id set
     if (_filterBlockDocIdSet == null) {
       _filterBlockDocIdSet = _filterOperator.nextBlock().getBlockDocIdSet();
       _blockDocIdIterator = _filterBlockDocIdSet.iterator();
     }
+
+    Tracing.ThreadAccountantOps.sample();
 
     int pos = 0;
     int[] docIds = THREAD_LOCAL_DOC_IDS.get();
@@ -79,9 +86,15 @@ public class DocIdSetOperator extends BaseOperator<DocIdSetBlock> {
     }
   }
 
+
   @Override
-  public String getOperatorName() {
-    return OPERATOR_NAME;
+  public String toExplainString() {
+    return EXPLAIN_NAME;
+  }
+
+  @Override
+  public List<Operator> getChildOperators() {
+    return Collections.singletonList(_filterOperator);
   }
 
   @Override

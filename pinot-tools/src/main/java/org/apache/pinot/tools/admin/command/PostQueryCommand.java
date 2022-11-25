@@ -18,7 +18,9 @@
  */
 package org.apache.pinot.tools.admin.command;
 
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker.Request;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -42,9 +44,6 @@ public class PostQueryCommand extends AbstractBaseAdminCommand implements Comman
   @CommandLine.Option(names = {"-brokerProtocol"}, required = false, description = "protocol for broker.")
   private String _brokerProtocol = "http";
 
-  @CommandLine.Option(names = {"-queryType"}, required = false, description = "Query use sql or pql.")
-  private String _queryType = Request.PQL;
-
   @CommandLine.Option(names = {"-query"}, required = true, description = "Query string to perform.")
   private String _query;
 
@@ -57,9 +56,17 @@ public class PostQueryCommand extends AbstractBaseAdminCommand implements Comman
   @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
   private String _authToken;
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
+
+  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true, description = "Print "
+      + "this message.")
   private boolean _help = false;
+
+  @CommandLine.Option(names = {"-o", "-option"}, required = false, description = "Additional options '-o key=value'")
+  private Map<String, String> _additionalOptions = new HashMap<>();
+
+  private AuthProvider _authProvider;
 
   @Override
   public boolean getHelp() {
@@ -74,12 +81,11 @@ public class PostQueryCommand extends AbstractBaseAdminCommand implements Comman
   @Override
   public String toString() {
     return ("PostQuery -brokerProtocol " + _brokerProtocol + " -brokerHost " + _brokerHost + " -brokerPort "
-        + _brokerPort + " -queryType " + _queryType + " -query " + _query);
+        + _brokerPort + " -query " + _query);
   }
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -112,18 +118,18 @@ public class PostQueryCommand extends AbstractBaseAdminCommand implements Comman
     return this;
   }
 
-  public PostQueryCommand setAuthToken(String authToken) {
-    _authToken = authToken;
-    return this;
-  }
-
-  public PostQueryCommand setQueryType(String queryType) {
-    _queryType = queryType;
-    return this;
-  }
-
   public PostQueryCommand setQuery(String query) {
     _query = query;
+    return this;
+  }
+
+  public PostQueryCommand setAuthProvider(AuthProvider authProvider) {
+    _authProvider = authProvider;
+    return this;
+  }
+
+  public PostQueryCommand setAdditionalOptions(Map<String, String> additionalOptions) {
+    _additionalOptions.putAll(additionalOptions);
     return this;
   }
 
@@ -132,18 +138,16 @@ public class PostQueryCommand extends AbstractBaseAdminCommand implements Comman
     if (_brokerHost == null) {
       _brokerHost = NetUtils.getHostAddress();
     }
-    LOGGER.info("Executing command: " + toString());
-
-    String request;
-    String urlString = _brokerProtocol + "://" + _brokerHost + ":" + _brokerPort + "/query";
-    if (_queryType.toLowerCase().equals(Request.SQL)) {
-      urlString += "/sql";
-      request = JsonUtils.objectToString(Collections.singletonMap(Request.SQL, _query));
-    } else {
-      request = JsonUtils.objectToString(Collections.singletonMap(Request.PQL, _query));
+    LOGGER.info("Executing command: " + this);
+    String url = _brokerProtocol + "://" + _brokerHost + ":" + _brokerPort + "/query/sql";
+    Map<String, String> payload = new HashMap<>();
+    payload.put(Request.SQL, _query);
+    if (_additionalOptions != null) {
+      payload.putAll(_additionalOptions);
     }
-
-    return sendRequest("POST", urlString, request, makeAuthHeader(makeAuthToken(_authToken, _user, _password)));
+    String request = JsonUtils.objectToString(payload);
+    return sendRequest("POST", url, request, makeAuthHeaders(makeAuthProvider(_authProvider,
+            _authTokenUrl, _authToken, _user, _password)));
   }
 
   @Override

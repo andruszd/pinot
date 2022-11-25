@@ -31,18 +31,39 @@ import org.apache.pinot.spi.annotations.InterfaceStability;
 @InterfaceStability.Stable
 public interface MessageBatch<T> {
   /**
-   *
-   * @return number of messages returned from the stream
+   * @return number of available messages
    */
   int getMessageCount();
+
+  /**
+   * @return number of messages returned from the stream
+   */
+  default int getUnfilteredMessageCount() {
+    return getMessageCount();
+  }
 
   /**
    * Returns the message at a particular index inside a set of messages returned from the stream.
    * @param index
    * @return
    */
+  @Deprecated
   T getMessageAtIndex(int index);
 
+  // for backward-compatibility
+  default byte[] getMessageBytesAtIndex(int index) {
+    return (byte[]) getMessageAtIndex(index);
+  }
+
+  default StreamMessage<T> getStreamMessage(int index) {
+    return new LegacyStreamMessage(getMessageBytesAtIndex(index));
+  }
+
+  class LegacyStreamMessage extends StreamMessage {
+    public LegacyStreamMessage(byte[] value) {
+      super(value, value.length);
+    }
+  }
   /**
    * Returns the offset of the message at a particular index inside a set of messages returned from the stream.
    * @param index
@@ -78,8 +99,15 @@ public interface MessageBatch<T> {
    * @param index
    * @return
    */
-  default StreamPartitionMsgOffset getNextStreamParitionMsgOffsetAtIndex(int index) {
+  default StreamPartitionMsgOffset getNextStreamPartitionMsgOffsetAtIndex(int index) {
     return new LongMsgOffset(getNextStreamMessageOffsetAtIndex(index));
+  }
+
+  /**
+   * @return last offset in the batch
+   */
+  default StreamPartitionMsgOffset getOffsetOfNextBatch() {
+    return getNextStreamPartitionMsgOffsetAtIndex(getMessageCount() - 1);
   }
 
   /**

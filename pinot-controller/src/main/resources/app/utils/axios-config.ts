@@ -20,6 +20,7 @@
 /* eslint-disable no-console */
 
 import axios from 'axios';
+import { AuthWorkflow } from 'Models';
 import app_state from '../app_state';
 
 const isDev = process.env.NODE_ENV !== 'production';
@@ -39,12 +40,22 @@ const handleResponse = (response: any) => {
 };
 
 const handleConfig = (config: any) => {
-  if(app_state.authToken){
-    Object.assign(config.headers, {"Authorization": app_state.authToken});
+  // Attach auth token for basic auth
+  if (app_state.authWorkflow === AuthWorkflow.BASIC && app_state.authToken) {
+    Object.assign(config.headers, { Authorization: app_state.authToken });
   }
+
+  // Attach auth token for OIDC auth
+  if (app_state.authWorkflow === AuthWorkflow.OIDC && app_state.authToken) {
+    Object.assign(config.headers, {
+      Authorization: `Bearer ${app_state.authToken}`,
+    });
+  }
+
   if (isDev) {
     console.log(config);
   }
+
   return config;
 };
 
@@ -55,3 +66,11 @@ baseApi.interceptors.response.use(handleResponse, handleError);
 export const transformApi = axios.create({baseURL: '/', transformResponse: [data => data]});
 transformApi.interceptors.request.use(handleConfig, handleError);
 transformApi.interceptors.response.use(handleResponse, handleError);
+
+// baseApi axios instance does not throw an error when API fails hence the control will never go to catch block
+// changing the handleError method of baseApi will cause current UI to break (as UI might have not handle error properly)
+// creating a new axios instance baseApiWithErrors which can be used when adding new API's
+// NOTE: It is an add-on utility and can be used in case you want to handle/show UI when API fails.
+export const baseApiWithErrors = axios.create({ baseURL: '/' });
+baseApiWithErrors.interceptors.request.use(handleConfig);
+baseApiWithErrors.interceptors.response.use(handleResponse);

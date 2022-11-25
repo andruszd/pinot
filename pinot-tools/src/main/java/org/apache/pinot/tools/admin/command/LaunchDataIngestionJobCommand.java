@@ -21,10 +21,12 @@ package org.apache.pinot.tools.admin.command;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.core.util.TlsUtils;
+import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.ingestion.batch.IngestionJobLauncher;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
 import org.apache.pinot.spi.ingestion.batch.spec.TlsSpec;
+import org.apache.pinot.spi.plugin.PluginManager;
 import org.apache.pinot.spi.utils.GroovyTemplateUtils;
 import org.apache.pinot.tools.Command;
 import org.slf4j.Logger;
@@ -57,6 +59,10 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
   private String _password;
   @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
   private String _authToken;
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
+
+  private AuthProvider _authProvider;
 
   public String getJobSpecFile() {
     return _jobSpecFile;
@@ -82,6 +88,10 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
     _propertyFile = propertyFile;
   }
 
+  public void setAuthProvider(AuthProvider authProvider) {
+    _authProvider = authProvider;
+  }
+
   @Override
   public boolean getHelp() {
     return _help;
@@ -99,7 +109,7 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
     SegmentGenerationJobSpec spec;
     try {
       spec = IngestionJobLauncher.getSegmentGenerationJobSpec(jobSpecFilePath, propertyFilePath,
-          GroovyTemplateUtils.getTemplateContext(_values));
+          GroovyTemplateUtils.getTemplateContext(_values), System.getenv());
     } catch (Exception e) {
       LOGGER.error("Got exception to generate IngestionJobSpec for data ingestion job - ", e);
       throw e;
@@ -107,18 +117,19 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
 
     TlsSpec tlsSpec = spec.getTlsSpec();
     if (tlsSpec != null) {
-      TlsUtils.installDefaultSSLSocketFactory(tlsSpec.getKeyStorePath(), tlsSpec.getKeyStorePassword(),
-          tlsSpec.getTrustStorePath(), tlsSpec.getTrustStorePassword());
+      TlsUtils.installDefaultSSLSocketFactory(tlsSpec.getKeyStoreType(), tlsSpec.getKeyStorePath(),
+          tlsSpec.getKeyStorePassword(), tlsSpec.getTrustStoreType(), tlsSpec.getTrustStorePath(),
+          tlsSpec.getTrustStorePassword());
     }
 
     if (StringUtils.isBlank(spec.getAuthToken())) {
-      spec.setAuthToken(makeAuthToken(_authToken, _user, _password));
+      spec.setAuthToken(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password).getTaskToken());
     }
 
     try {
       IngestionJobLauncher.runIngestionJob(spec);
     } catch (Exception e) {
-      LOGGER.error("Got exception to kick off standalone data ingestion job - ", e);
+      LOGGER.error("Got exception to kick off {} data ingestion job - ", spec.getExecutionFrameworkSpec().getName(), e);
       throw e;
     }
     return true;
@@ -144,5 +155,11 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
   @Override
   public String description() {
     return "Launch a data ingestion job.";
+  }
+
+  public static void main(String[] args) {
+    PluginManager.get().init();
+    int exitCode = new CommandLine(new LaunchDataIngestionJobCommand()).execute(args);
+    System.exit(exitCode);
   }
 }

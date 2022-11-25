@@ -53,11 +53,19 @@ public interface InstanceDataManagerConfig {
 
   int getMaxParallelSegmentBuilds();
 
-  String getAuthToken();
+  int getMaxParallelSegmentDownloads();
 
-  String getTierBackend();
-
-  PinotConfiguration getTierConfigs();
+  String getSegmentDirectoryLoader();
 
   long getErrorCacheSize();
+
+  boolean isStreamSegmentDownloadUntar();
+
+  long getStreamSegmentDownloadUntarRateLimit();
+
+  int getDeletedSegmentsCacheSize();
+
+  int getDeletedSegmentsCacheTtlMinutes();
+
+  String getSegmentPeerDownloadScheme();
 }

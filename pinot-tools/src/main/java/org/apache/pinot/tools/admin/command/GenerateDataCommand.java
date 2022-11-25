@@ -64,7 +64,7 @@ public class GenerateDataCommand extends AbstractBaseAdminCommand implements Com
   @CommandLine.Option(names = {"-schemaFile"}, required = true, description = "File containing schema for data.")
   private String _schemaFile = null;
 
-  @CommandLine.Option(names = {"-schemaAnnotationFile"}, required = false, 
+  @CommandLine.Option(names = {"-schemaAnnotationFile"}, required = false,
       description = "File containing dim/metrics for columns.")
   private String _schemaAnnFile;
 
@@ -79,7 +79,7 @@ public class GenerateDataCommand extends AbstractBaseAdminCommand implements Com
   private boolean _help = false;
 
   @CommandLine.Option(names = {"-format"}, required = false, help = true,
-      description = "Output format ('avro' or 'csv').")
+      description = "Output format ('AVRO' or 'CSV').")
   private String _format = FORMAT_AVRO;
 
   @Override
@@ -108,7 +108,6 @@ public class GenerateDataCommand extends AbstractBaseAdminCommand implements Com
 
   @Override
   public void cleanup() {
-
   }
 
   @Override
@@ -147,9 +146,9 @@ public class GenerateDataCommand extends AbstractBaseAdminCommand implements Com
     final DataGenerator gen = new DataGenerator();
     gen.init(spec);
 
-    if (FORMAT_AVRO.equals(_format)) {
+    if (FORMAT_AVRO.equalsIgnoreCase(_format)) {
       gen.generateAvro(_numRecords, _numFiles);
-    } else if (FORMAT_CSV.equals(_format)) {
+    } else if (FORMAT_CSV.equalsIgnoreCase(_format)) {
       gen.generateCsv(_numRecords, _numFiles);
     } else {
       throw new IllegalArgumentException(String.format("Invalid output format '%s'", _format));

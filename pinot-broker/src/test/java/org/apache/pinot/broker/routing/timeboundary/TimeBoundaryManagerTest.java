@@ -23,21 +23,24 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import org.apache.helix.ZNRecord;
-import org.apache.helix.manager.zk.ZNRecordSerializer;
 import org.apache.helix.manager.zk.ZkBaseDataAccessor;
-import org.apache.helix.manager.zk.ZkClient;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.IdealState;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
+import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
+import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
+import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.controller.helix.ControllerTest;
+import org.apache.pinot.core.routing.TimeBoundaryInfo;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.TimeGranularitySpec;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.mockito.Mockito;
@@ -47,7 +50,6 @@ import org.testng.annotations.Test;
 
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.OFFLINE;
 import static org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel.ONLINE;
-import static org.mockito.Mockito.mock;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
@@ -111,11 +113,12 @@ public class TimeBoundaryManagerTest extends ControllerTest {
     Map<String, String> offlineInstanceStateMap = Collections.singletonMap("server", OFFLINE);
     Set<String> onlineSegments = new HashSet<>();
     // NOTE: Ideal state is not used in the current implementation.
-    IdealState idealState = mock(IdealState.class);
+    IdealState idealState = new IdealState("");
 
     // Start with no segment
-    TimeBoundaryManager timeBoundaryManager = new TimeBoundaryManager(tableConfig, _propertyStore);
-    timeBoundaryManager.init(externalView, idealState, onlineSegments);
+    TimeBoundaryManager timeBoundaryManager =
+        new TimeBoundaryManager(tableConfig, _propertyStore, Mockito.mock(BrokerMetrics.class));
+    timeBoundaryManager.init(idealState, externalView, onlineSegments);
     assertNull(timeBoundaryManager.getTimeBoundaryInfo());
 
     // Add the first segment should update the time boundary
@@ -123,7 +126,7 @@ public class TimeBoundaryManagerTest extends ControllerTest {
     onlineSegments.add(segment0);
     segmentAssignment.put(segment0, onlineInstanceStateMap);
     setSegmentZKMetadata(rawTableName, segment0, 2, timeUnit);
-    timeBoundaryManager.init(externalView, idealState, onlineSegments);
+    timeBoundaryManager.init(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(1, TimeUnit.DAYS));
 
     // Add a new segment with larger end time but no ONLINE instance should not update the time boundary
@@ -131,12 +134,12 @@ public class TimeBoundaryManagerTest extends ControllerTest {
     onlineSegments.add(segment1);
     segmentAssignment.put(segment1, offlineInstanceStateMap);
     setSegmentZKMetadata(rawTableName, segment1, 4, timeUnit);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(1, TimeUnit.DAYS));
 
     // Turn the new segment ONLINE should update the time boundary
     segmentAssignment.put(segment1, onlineInstanceStateMap);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(3, TimeUnit.DAYS));
 
     // Add new segment with larger end time but 0 total docs, should not update time boundary
@@ -144,7 +147,7 @@ public class TimeBoundaryManagerTest extends ControllerTest {
     onlineSegments.add(segmentEmpty);
     segmentAssignment.put(segmentEmpty, onlineInstanceStateMap);
     setSegmentZKMetadataWithTotalDocs(rawTableName, segmentEmpty, 6, timeUnit, 0);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(3, TimeUnit.DAYS));
 
     // Add a new segment with smaller end time should not change the time boundary
@@ -152,36 +155,56 @@ public class TimeBoundaryManagerTest extends ControllerTest {
     onlineSegments.add(segment2);
     segmentAssignment.put(segment2, onlineInstanceStateMap);
     setSegmentZKMetadata(rawTableName, segment2, 3, timeUnit);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(3, TimeUnit.DAYS));
 
     // Remove the segment with largest end time should update the time boundary
     onlineSegments.remove(segment1);
     segmentAssignment.remove(segment1);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(2, TimeUnit.DAYS));
 
     // Change segment ZK metadata without refreshing should not update the time boundary
     setSegmentZKMetadata(rawTableName, segment2, 5, timeUnit);
-    timeBoundaryManager.onExternalViewChange(externalView, idealState, onlineSegments);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(2, TimeUnit.DAYS));
 
     // Refresh the changed segment should update the time boundary
     timeBoundaryManager.refreshSegment(segment2);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(4, TimeUnit.DAYS));
+
+    // Setting the enforced time boundary in ideal state should update the time boundary
+    idealState.getRecord().setSimpleField(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY,
+        Long.toString(TimeUnit.MILLISECONDS.convert(50, TimeUnit.DAYS)));
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
+    verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(50, TimeUnit.DAYS));
+
+    // Refresh with more recent segment should not update the enforced time boundary
+    String segment3 = "segment3";
+    setSegmentZKMetadata(rawTableName, segment3, 100, timeUnit);
+    onlineSegments.add(segment3);
+    segmentAssignment.put(segment3, onlineInstanceStateMap);
+    timeBoundaryManager.refreshSegment(segment3);
+    verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(50, TimeUnit.DAYS));
+
+    // Unsetting the enforced time boundary should change it to most recent time boundary
+    idealState.getRecord().getSimpleFields().remove(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
+    verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(99, TimeUnit.DAYS));
   }
 
   private void testHourlyPushTable(String rawTableName, TableConfig tableConfig, TimeUnit timeUnit) {
     // NOTE: External view and ideal state are not used in the current implementation.
     ExternalView externalView = Mockito.mock(ExternalView.class);
-    IdealState idealState = Mockito.mock(IdealState.class);
+    IdealState idealState = new IdealState("");
 
-    TimeBoundaryManager timeBoundaryManager = new TimeBoundaryManager(tableConfig, _propertyStore);
+    TimeBoundaryManager timeBoundaryManager =
+        new TimeBoundaryManager(tableConfig, _propertyStore, Mockito.mock(BrokerMetrics.class));
     Set<String> onlineSegments = new HashSet<>();
     String segment0 = "segment0";
     onlineSegments.add(segment0);
     setSegmentZKMetadata(rawTableName, segment0, 2, timeUnit);
-    timeBoundaryManager.init(externalView, idealState, onlineSegments);
+    timeBoundaryManager.init(idealState, externalView, onlineSegments);
     long expectedTimeValue;
     if (timeUnit == TimeUnit.DAYS) {
       // Time boundary should be endTime - 1 DAY when time unit is DAYS
@@ -190,6 +213,17 @@ public class TimeBoundaryManagerTest extends ControllerTest {
       // Time boundary should be endTime - 1 HOUR when time unit is other than DAYS
       expectedTimeValue = timeUnit.convert(47, TimeUnit.HOURS);
     }
+    verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), expectedTimeValue);
+
+    // Setting the enforced time boundary in ideal state should update the time boundary
+    idealState.getRecord().setSimpleField(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY,
+        Long.toString(TimeUnit.MILLISECONDS.convert(50, TimeUnit.HOURS)));
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
+    verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), timeUnit.convert(50, TimeUnit.HOURS));
+
+    // Unsetting the enforced time boundary should change it back to original time boundary
+    idealState.getRecord().getSimpleFields().remove(CommonConstants.IdealState.HYBRID_TABLE_TIME_BOUNDARY);
+    timeBoundaryManager.onAssignmentChange(idealState, externalView, onlineSegments);
     verifyTimeBoundaryInfo(timeBoundaryManager.getTimeBoundaryInfo(), expectedTimeValue);
   }
 
